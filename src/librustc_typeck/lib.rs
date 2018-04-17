@@ -211,7 +211,7 @@ fn check_main_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 tcx.mk_nil()
             };
 
-            let se_ty = tcx.mk_fn_ptr(ty::Binder(
+            let se_ty = tcx.mk_fn_ptr(ty::Binder::bind(
                 tcx.mk_fn_sig(
                     iter::empty(),
                     expected_return_type,
@@ -260,7 +260,7 @@ fn check_start_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                 _ => ()
             }
 
-            let se_ty = tcx.mk_fn_ptr(ty::Binder(
+            let se_ty = tcx.mk_fn_ptr(ty::Binder::bind(
                 tcx.mk_fn_sig(
                     [
                         tcx.types.isize,
