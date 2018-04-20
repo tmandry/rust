@@ -849,9 +849,10 @@ fn vtable_methods<'a, 'tcx>(
 
                 // the method may have some early-bound lifetimes, add
                 // regions for those
-                let substs = Substs::for_item(tcx, def_id,
-                                              |_, _| tcx.types.re_erased,
-                                              |def, _| trait_ref.substs().type_for_def(def));
+                let substs = Substs::for_item(
+                    tcx, def_id,
+                    |_, _| tcx.types.re_erased,
+                    |def, _| trait_ref.skip_binder().substs.type_for_def(def));
 
                 // the trait type may have higher-ranked lifetimes in it;
                 // so erase them if they appear, so that we get the type
