@@ -478,7 +478,7 @@ impl<'a, 'gcx, 'tcx> GeneratorSubsts<'tcx> {
         def_id: DefId,
         tcx: TyCtxt<'a, 'gcx, 'tcx>,
     ) -> impl Iterator<Item=Ty<'tcx>> + Captures<'gcx> + 'a {
-        let state = tcx.generator_layout(def_id).fields.iter();
+        let state = tcx.generator_layout(def_id).iter_fields();
         state.map(move |d| d.ty.subst(tcx, self.substs))
     }
 

@@ -2921,7 +2921,15 @@ pub struct UnsafetyCheckResult {
 /// The layout of generator state
 #[derive(Clone, Debug, RustcEncodable, RustcDecodable, HashStable)]
 pub struct GeneratorLayout<'tcx> {
-    pub fields: Vec<LocalDecl<'tcx>>,
+    pub prefix_fields: Vec<LocalDecl<'tcx>>,
+    pub variants_fields: Vec<Vec<LocalDecl<'tcx>>>,
+}
+
+impl<'tcx> GeneratorLayout<'tcx> {
+    pub fn iter_fields(&self) -> impl Iterator<Item = &LocalDecl<'tcx>> {
+        let variant_fields = self.variants_fields.iter().flat_map(|p| p.iter());
+        self.prefix_fields.iter().chain(variant_fields)
+    }
 }
 
 #[derive(Clone, Debug, RustcEncodable, RustcDecodable, HashStable)]
@@ -3110,7 +3118,8 @@ BraceStructTypeFoldableImpl! {
 
 BraceStructTypeFoldableImpl! {
     impl<'tcx> TypeFoldable<'tcx> for GeneratorLayout<'tcx> {
-        fields
+        prefix_fields,
+        variants_fields,
     }
 }
 

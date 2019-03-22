@@ -545,8 +545,10 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         ((local, (var.ty, upvar_len + 1 + idx)), var)
     }).unzip();
 
+    let num_suspend_points = storage_liveness.len();
     let layout = GeneratorLayout {
-        fields: vars
+        prefix_fields: vars,
+        variants_fields: vec![vec![]; num_suspend_points],
     };
 
     (remap, layout, storage_liveness)

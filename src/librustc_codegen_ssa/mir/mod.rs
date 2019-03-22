@@ -657,8 +657,7 @@ fn arg_local_refs<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>>(
                     let state_tys = gen_substs.state_tys(def_id, tcx);
 
                     let upvar_count = mir.upvar_decls.len();
-                    generator_layout.fields
-                        .iter()
+                    generator_layout.iter_fields()
                         .zip(state_tys)
                         .enumerate()
                         .filter_map(move |(i, (decl, ty))| {
