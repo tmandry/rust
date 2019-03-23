@@ -158,6 +158,8 @@ struct SuspensionPoint {
     storage_liveness: liveness::LiveVarSet,
 }
 
+type BasicBlockList = BitSet<BasicBlock>;
+
 struct TransformVisitor<'a, 'tcx: 'a> {
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     state_adt_ref: &'tcx AdtDef,
@@ -176,6 +178,9 @@ struct TransformVisitor<'a, 'tcx: 'a> {
 
     // A list of suspension points, generated during the transform
     suspension_points: Vec<SuspensionPoint>,
+
+    // The canonical ordering of suspension points
+    suspending_blocks: BasicBlockList,
 
     // The original RETURN_PLACE local
     new_ret_local: Local,
@@ -274,7 +279,9 @@ impl<'a, 'tcx> MutVisitor<'tcx> for TransformVisitor<'a, 'tcx> {
                                             box self.make_state(state_idx, v)),
             });
             let state = if let Some(resume) = resume { // Yield
-                let state = 3 + self.suspension_points.len() as u32;
+                // Use an ordering of suspension points that matches the layout.
+                let block_idx = self.suspending_blocks.iter().position(|b| b == block).unwrap();
+                let state = 3 + block_idx as u32;
 
                 self.suspension_points.push(SuspensionPoint {
                     state,
@@ -387,7 +394,10 @@ fn locals_live_across_suspend_points(
     movable: bool,
 ) -> (
     liveness::LiveVarSet,
+    liveness::LiveVarSet,
+    Vec<liveness::LiveVarSet>,
     FxHashMap<BasicBlock, liveness::LiveVarSet>,
+    BasicBlockList,
 ) {
     let dead_unwinds = BitSet::new_empty(mir.basic_blocks().len());
     let def_id = source.def_id();
@@ -418,7 +428,6 @@ fn locals_live_across_suspend_points(
     };
 
     // Calculate the liveness of MIR locals ignoring borrows.
-    let mut set = liveness::LiveVarSet::new_empty(mir.local_decls.len());
     let mut liveness = liveness::liveness_of_locals(
         mir,
     );
@@ -430,10 +439,21 @@ fn locals_live_across_suspend_points(
         &liveness,
     );
 
+    // The set of all locals live across a yield point.
+    let mut set = liveness::LiveVarSet::new_empty(mir.local_decls.len());
+    // The set of locals live across multiple yield points.
+    let mut set_live_across_multiple = liveness::LiveVarSet::new_empty(mir.local_decls.len());
+    // The set of live locals at each yield point.
+    let mut local_liveness = Vec::<liveness::LiveVarSet>::new();
+    // The storage liveness in each basic block that yields.
     let mut storage_liveness_map = FxHashMap::default();
+
+    let mut suspending_blocks = BasicBlockList::new_empty(mir.basic_blocks().len());
 
     for (block, data) in mir.basic_blocks().iter_enumerated() {
         if let TerminatorKind::Yield { .. } = data.terminator().kind {
+            suspending_blocks.insert(block);
+
             let loc = Location {
                 block: block,
                 statement_index: data.statements.len(),
@@ -475,17 +495,35 @@ fn locals_live_across_suspend_points(
             storage_liveness.intersect(&liveness.outs[block]);
 
             let live_locals = storage_liveness;
+            local_liveness.push(live_locals.clone());
 
-            // Add the locals life at this suspension point to the set of locals which live across
-            // any suspension points
+            // Compute the locals live at this suspension point and at least one
+            // other before it
+            let mut upgrade_locals = set.clone();
+            upgrade_locals.intersect(&live_locals);
+            set_live_across_multiple.union(&upgrade_locals);
+
+            // Add the locals live at this suspension point to the set of locals
+            // which live across any suspension points
             set.union(&live_locals);
         }
     }
 
     // The generator argument is ignored
     set.remove(self_arg());
+    set_live_across_multiple.remove(self_arg());
 
-    (set, storage_liveness_map)
+    // Now, go back through the yield points and collect the locals which are
+    // only live across that yield point. We will use this in determining the
+    // layout of the generator.
+    let mut set_only_one = set.clone();
+    set_only_one.subtract(&set_live_across_multiple);
+    let one_yield_locals = local_liveness.into_iter().map(|mut live_locals| {
+        live_locals.intersect(&set_only_one);
+        live_locals
+    }).collect();
+
+    (set, set_live_across_multiple, one_yield_locals, storage_liveness_map, suspending_blocks)
 }
 
 fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
@@ -496,13 +534,13 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                             mir: &mut Mir<'tcx>)
     -> (FxHashMap<Local, (Ty<'tcx>, usize)>,
         GeneratorLayout<'tcx>,
-        FxHashMap<BasicBlock, liveness::LiveVarSet>)
+        FxHashMap<BasicBlock, liveness::LiveVarSet>,
+        BasicBlockList)
 {
     // Use a liveness analysis to compute locals which are live across a suspension point
-    let (live_locals, storage_liveness) = locals_live_across_suspend_points(tcx,
-                                                                            mir,
-                                                                            source,
-                                                                            movable);
+    let (live_locals, always_live_locals, one_yield_locals, storage_liveness, suspending_blocks) =
+        locals_live_across_suspend_points(tcx, mir, source, movable);
+
     // Erase regions from the types passed in from typeck so we can compare them with
     // MIR types
     let allowed_upvars = tcx.erase_regions(&upvars);
@@ -530,28 +568,29 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     let upvar_len = mir.upvar_decls.len();
     let dummy_local = LocalDecl::new_internal(tcx.mk_unit(), mir.span);
+    let mut remap = FxHashMap::default();
+    let mut get_live_fields = |locals: liveness::LiveVarSet| {
+        let remap_len = remap.len();
+        locals.iter().enumerate().map(|(idx, local)| {
+            // Gather LocalDecls of live locals replacing values in mir.local_decls
+            // with a dummy to avoid changing local indices.
+            let field = mem::replace(&mut mir.local_decls[local], dummy_local.clone());
 
-    // Gather live locals and their indices replacing values in mir.local_decls with a dummy
-    // to avoid changing local indices
-    let live_decls = live_locals.iter().map(|local| {
-        let var = mem::replace(&mut mir.local_decls[local], dummy_local.clone());
-        (local, var)
-    });
+            // Create a map from local indices to generator struct indices.
+            // These are offset by (upvar_len + 1) because of fields which come before locals.
+            remap.insert(local, (field.ty, upvar_len + 1 + remap_len + idx));
 
-    // Create a map from local indices to generator struct indices.
-    // These are offset by (upvar_len + 1) because of fields which comes before locals.
-    // We also create a vector of the LocalDecls of these locals.
-    let (remap, vars) = live_decls.enumerate().map(|(idx, (local, var))| {
-        ((local, (var.ty, upvar_len + 1 + idx)), var)
-    }).unzip();
-
-    let num_suspend_points = storage_liveness.len();
-    let layout = GeneratorLayout {
-        prefix_fields: vars,
-        variants_fields: vec![vec![]; num_suspend_points],
+            field
+        }).collect::<Vec<_>>()
     };
 
-    (remap, layout, storage_liveness)
+    // Ordering of fields is: upvars, discriminant, prefix_fields, variants_fields.
+    let layout = GeneratorLayout {
+        prefix_fields: get_live_fields(always_live_locals),
+        variants_fields: one_yield_locals.into_iter().map(get_live_fields).collect(),
+    };
+
+    (remap, layout, storage_liveness, suspending_blocks)
 }
 
 fn insert_switch<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
@@ -916,7 +955,8 @@ impl MirPass for StateTransform {
         // Extract locals which are live across suspension point into `layout`
         // `remap` gives a mapping from local indices onto generator struct indices
         // `storage_liveness` tells us which locals have live storage at suspension points
-        let (remap, layout, storage_liveness) = compute_layout(
+        // `suspending_blocks` gives a canonical numbering for each suspension point
+        let (remap, layout, storage_liveness, suspending_blocks) = compute_layout(
             tcx,
             source,
             upvars,
@@ -937,6 +977,7 @@ impl MirPass for StateTransform {
             remap,
             storage_liveness,
             suspension_points: Vec::new(),
+            suspending_blocks,
             new_ret_local,
             state_field,
         };
