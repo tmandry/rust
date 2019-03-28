@@ -482,13 +482,23 @@ impl<'a, 'gcx, 'tcx> GeneratorSubsts<'tcx> {
         state.map(move |d| d.ty.subst(tcx, self.substs))
     }
 
+    /// This is the type of the variant tag field.
+    pub fn variant_tag_ty(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Ty<'tcx> {
+        tcx.types.u32
+    }
+
+    /// This is the index of the discriminant in the generator fields.
+    pub fn discr_index(&self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> usize {
+        self.upvar_tys(def_id, tcx).count()
+    }
+
     /// This is the types of the fields of a generate which
     /// is available before the generator transformation.
     /// It includes the upvars and the state discriminant which is u32.
     pub fn pre_transforms_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) ->
         impl Iterator<Item=Ty<'tcx>> + 'a
     {
-        self.upvar_tys(def_id, tcx).chain(iter::once(tcx.types.u32))
+        self.upvar_tys(def_id, tcx).chain(iter::once(self.variant_tag_ty(tcx)))
     }
 
     /// This is the types of all the fields stored in a generator.
@@ -497,6 +507,26 @@ impl<'a, 'gcx, 'tcx> GeneratorSubsts<'tcx> {
         impl Iterator<Item=Ty<'tcx>> + Captures<'gcx> + 'a
     {
         self.pre_transforms_tys(def_id, tcx).chain(self.state_tys(def_id, tcx))
+    }
+
+    /// This is the types of all fields which are valid across yield points.
+    pub fn prefix_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) ->
+        impl Iterator<Item=Ty<'tcx>> + Captures<'gcx> + 'a
+    {
+        let valid_state = tcx.generator_layout(def_id)
+            .prefix_fields.iter()
+            .map(move |d| d.ty.subst(tcx, self.substs));
+        self.pre_transforms_tys(def_id, tcx).chain(valid_state)
+    }
+
+    /// This is the types of all fields which are only valid across single
+    /// suspension points, grouped by suspension point.
+    pub fn variants_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) ->
+        impl Iterator<Item=impl Iterator<Item=Ty<'tcx>> + Captures<'gcx> + 'a>
+    {
+        tcx.generator_layout(def_id)
+            .variants_fields.iter()
+            .map(move |v| v.iter().map(move |d| d.ty.subst(tcx, self.substs)))
     }
 }
 

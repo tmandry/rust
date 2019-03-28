@@ -604,12 +604,53 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                 tcx.intern_layout(unit)
             }
 
-            // Tuples, generators and closures.
             ty::Generator(def_id, ref substs, _) => {
-                let tys = substs.field_tys(def_id, tcx);
-                univariant(&tys.map(|ty| self.layout_of(ty)).collect::<Result<Vec<_>, _>>()?,
+                let prefix_tys = substs.prefix_tys(def_id, tcx);
+                let prefix = univariant_uninterned(
+                    &prefix_tys.map(|ty| self.layout_of(ty)).collect::<Result<Vec<_>, _>>()?,
                     &ReprOptions::default(),
-                    StructKind::AlwaysSized)?
+                    StructKind::AlwaysSized)?;
+
+                let mut size = prefix.size;
+                let mut align = prefix.align;
+                let variants_tys = substs.variants_tys(def_id, tcx);
+                let variants = variants_tys.enumerate().map(|(i, variant_tys)| {
+                    let mut variant = univariant_uninterned(
+                        &variant_tys.map(|ty| self.layout_of(ty)).collect::<Result<Vec<_>, _>>()?,
+                        &ReprOptions::default(),
+                        StructKind::Prefixed(prefix.size, prefix.align.abi))?;
+
+                    variant.variants = Variants::Single { index: VariantIdx::new(i) };
+
+                    size = size.max(variant.size);
+                    align = align.max(variant.align);
+
+                    Ok(variant)
+                }).collect::<Result<IndexVec<VariantIdx, _>, _>>()?;
+
+                let abi = if prefix.abi.is_uninhabited() ||
+                             variants.iter().all(|v| v.abi.is_uninhabited()) {
+                    Abi::Uninhabited
+                } else {
+                    Abi::Aggregate { sized: true }
+                };
+                let discr = match &self.layout_of(substs.variant_tag_ty(tcx))?.abi {
+                    Abi::Scalar(s) => s.clone(),
+                    _ => bug!(),
+                };
+
+                tcx.intern_layout(LayoutDetails {
+                    variants: Variants::Multiple {
+                        discr,
+                        discr_kind: DiscriminantKind::Tag,
+                        discr_index: substs.discr_index(def_id, tcx),
+                        variants,
+                    },
+                    fields: prefix.fields,
+                    abi,
+                    size,
+                    align,
+                })
             }
 
             ty::Closure(def_id, ref substs) => {
@@ -1720,7 +1761,7 @@ impl<'a, 'tcx, C> TyLayoutMethods<'tcx, C> for Ty<'tcx>
             }
 
             ty::Generator(def_id, ref substs, _) => {
-                substs.field_tys(def_id, tcx).nth(i).unwrap()
+                substs.prefix_tys(def_id, tcx).nth(i).unwrap()
             }
 
             ty::Tuple(tys) => tys[i],

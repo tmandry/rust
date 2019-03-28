@@ -622,7 +622,6 @@ pub fn type_metadata(
 
             // This is actually a function pointer, so wrap it in pointer DI
             MetadataCreationResult::new(pointer_type_metadata(cx, t, fn_metadata), false)
-
         }
         ty::Closure(def_id, substs) => {
             let upvar_tys : Vec<_> = substs.upvar_tys(def_id, cx.tcx).collect();
@@ -633,7 +632,7 @@ pub fn type_metadata(
                                    usage_site_span).finalize(cx)
         }
         ty::Generator(def_id, substs,  _) => {
-            let upvar_tys : Vec<_> = substs.field_tys(def_id, cx.tcx).map(|t| {
+            let upvar_tys : Vec<_> = substs.prefix_tys(def_id, cx.tcx).map(|t| {
                 cx.tcx.normalize_erasing_regions(ParamEnv::reveal_all(), t)
             }).collect();
             prepare_tuple_metadata(cx,
