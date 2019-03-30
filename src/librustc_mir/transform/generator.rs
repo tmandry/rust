@@ -126,9 +126,9 @@ impl<'tcx> MutVisitor<'tcx> for PinArgVisitor<'tcx> {
     }
 
     fn visit_place(&mut self,
-                    place: &mut Place<'tcx>,
-                    context: PlaceContext<'tcx>,
-                    location: Location) {
+                   place: &mut Place<'tcx>,
+                   context: PlaceContext<'tcx>,
+                   location: Location) {
         if *place == Place::Base(PlaceBase::Local(self_arg())) {
             *place = Place::Projection(Box::new(Projection {
                 base: place.clone(),
@@ -168,9 +168,10 @@ struct TransformVisitor<'a, 'tcx: 'a> {
     // The index of the generator state in the generator struct
     state_field: usize,
 
-    // Mapping from Local to (type of local, generator struct index)
+    // Mapping from Local to (type of local, generator struct index, optional
+    // variant index)
     // FIXME(eddyb) This should use `IndexVec<Local, Option<_>>`.
-    remap: FxHashMap<Local, (Ty<'tcx>, usize)>,
+    remap: FxHashMap<Local, (Ty<'tcx>, usize, Option<VariantIdx>)>,
 
     // A map from a suspension point in a block to the locals which have live storage at that point
     // FIXME(eddyb) This should use `IndexVec<BasicBlock, Option<_>>`.
@@ -194,8 +195,12 @@ impl<'a, 'tcx> TransformVisitor<'a, 'tcx> {
     }
 
     // Create a Place referencing a generator struct field
-    fn make_field(&self, idx: usize, ty: Ty<'tcx>) -> Place<'tcx> {
-        let base = Place::Base(PlaceBase::Local(self_arg()));
+    fn make_field(&self, variant: Option<VariantIdx>, idx: usize, ty: Ty<'tcx>) -> Place<'tcx> {
+        let self_place = Place::Base(PlaceBase::Local(self_arg()));
+        let base = match variant {
+            Some(variant_index) => self_place.downcast_unnamed(variant_index),
+            None => self_place,
+        };
         let field = Projection {
             base: base,
             elem: ProjectionElem::Field(Field::new(idx), ty),
@@ -205,7 +210,7 @@ impl<'a, 'tcx> TransformVisitor<'a, 'tcx> {
 
     // Create a statement which changes the generator state
     fn set_state(&self, state_disc: u32, source_info: SourceInfo) -> Statement<'tcx> {
-        let state = self.make_field(self.state_field, self.tcx.types.u32);
+        let state = self.make_field(None, self.state_field, self.tcx.types.u32);
         let val = Operand::Constant(box Constant {
             span: source_info.span,
             ty: self.tcx.types.u32,
@@ -237,8 +242,8 @@ impl<'a, 'tcx> MutVisitor<'tcx> for TransformVisitor<'a, 'tcx> {
                     location: Location) {
         if let Place::Base(PlaceBase::Local(l)) = *place {
             // Replace an Local in the remap with a generator struct access
-            if let Some(&(ty, idx)) = self.remap.get(&l) {
-                *place = self.make_field(idx, ty);
+            if let Some(&(ty, idx, variant_index)) = self.remap.get(&l) {
+                *place = self.make_field(variant_index, idx, ty);
             }
         } else {
             self.super_place(place, context, location);
@@ -532,7 +537,7 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                             interior: Ty<'tcx>,
                             movable: bool,
                             mir: &mut Mir<'tcx>)
-    -> (FxHashMap<Local, (Ty<'tcx>, usize)>,
+    -> (FxHashMap<Local, (Ty<'tcx>, usize, Option<VariantIdx>)>,
         GeneratorLayout<'tcx>,
         FxHashMap<BasicBlock, liveness::LiveVarSet>,
         BasicBlockList)
@@ -569,16 +574,14 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let upvar_len = mir.upvar_decls.len();
     let dummy_local = LocalDecl::new_internal(tcx.mk_unit(), mir.span);
     let mut remap = FxHashMap::default();
-    let mut get_live_fields = |locals: liveness::LiveVarSet| {
-        let remap_len = remap.len();
+    let mut get_live_fields = |locals: liveness::LiveVarSet, variant, field_offset| {
         locals.iter().enumerate().map(|(idx, local)| {
             // Gather LocalDecls of live locals replacing values in mir.local_decls
             // with a dummy to avoid changing local indices.
             let field = mem::replace(&mut mir.local_decls[local], dummy_local.clone());
 
             // Create a map from local indices to generator struct indices.
-            // These are offset by (upvar_len + 1) because of fields which come before locals.
-            remap.insert(local, (field.ty, upvar_len + 1 + remap_len + idx));
+            remap.insert(local, (field.ty, field_offset + idx, variant));
 
             field
         }).collect::<Vec<_>>()
@@ -586,8 +589,12 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     // Ordering of fields is: upvars, discriminant, prefix_fields, variants_fields.
     let layout = GeneratorLayout {
-        prefix_fields: get_live_fields(always_live_locals),
-        variants_fields: one_yield_locals.into_iter().map(get_live_fields).collect(),
+        // These fields are offset by (upvar_len + 1) because of fields which come before locals.
+        prefix_fields: get_live_fields(always_live_locals, None, upvar_len + 1),
+        variants_fields: one_yield_locals.into_iter()
+            .enumerate()
+            .map(|(idx, fields)| get_live_fields(fields, Some(VariantIdx::new(idx)), 0))
+            .collect(),
     };
 
     (remap, layout, storage_liveness, suspending_blocks)
@@ -601,7 +608,7 @@ fn insert_switch<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let default_block = insert_term_block(mir, default);
 
     let switch = TerminatorKind::SwitchInt {
-        discr: Operand::Copy(transform.make_field(transform.state_field, tcx.types.u32)),
+        discr: Operand::Copy(transform.make_field(None, transform.state_field, tcx.types.u32)),
         switch_ty: tcx.types.u32,
         values: Cow::from(cases.iter().map(|&(i, _)| i.into()).collect::<Vec<_>>()),
         targets: cases.iter().map(|&(_, d)| d).chain(once(default_block)).collect(),
