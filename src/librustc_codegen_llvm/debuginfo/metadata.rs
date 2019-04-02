@@ -635,6 +635,8 @@ pub fn type_metadata(
             let upvar_tys : Vec<_> = substs.prefix_tys(def_id, cx.tcx).map(|t| {
                 cx.tcx.normalize_erasing_regions(ParamEnv::reveal_all(), t)
             }).collect();
+            // TODO use prepare_enum_metadata and update it to handle multiple
+            // fields in the outer layout.
             prepare_tuple_metadata(cx,
                                    t,
                                    &upvar_tys,
@@ -1759,6 +1761,7 @@ fn prepare_enum_metadata(
     };
 
     // The variant part must be wrapped in a struct according to DWARF.
+    // TODO create remaining fields here, if any.
     let type_array = create_DIArray(DIB(cx), &[Some(variant_part)]);
     let struct_wrapper = unsafe {
         llvm::LLVMRustDIBuilderCreateStructType(
