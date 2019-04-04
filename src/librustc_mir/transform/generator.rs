@@ -573,16 +573,20 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         }).collect::<Vec<_>>()
     };
 
-    // Ordering of fields is: upvars, discriminant, prefix_fields, variants_fields.
-    let layout = GeneratorLayout {
-        // These fields are offset by (upvar_len + 1) because of fields which come before locals.
-        prefix_fields: get_live_fields(always_live_locals, None, upvar_len + 1),
-        variants_fields: one_yield_locals.into_iter()
-            .enumerate()
-            .map(|(idx, fields)| get_live_fields(fields, Some(VariantIdx::new(idx)), 0))
-            .collect(),
-    };
+    // These fields are offset by (upvar_len + 1) because of fields which come before locals.
+    let prefix_fields = get_live_fields(always_live_locals, None, upvar_len + 1);
 
+    // Add three empty variants at the beginning so the state indices line up
+    // with our generator variants.
+    let mut variants_fields = vec![vec![], vec![], vec![]];
+    variants_fields.extend(one_yield_locals.into_iter()
+        .enumerate()
+        .map(|(idx, fields)| get_live_fields(fields, Some(VariantIdx::new(idx + 3)), 0)));
+
+    // Ordering of fields is: upvars, discriminant, prefix_fields, variants_fields.
+    let layout = GeneratorLayout { prefix_fields, variants_fields };
+
+    debug!("compute_layout() => remap={:#?}", remap);
     (remap, layout, storage_liveness, suspending_blocks)
 }
 
@@ -593,7 +597,7 @@ fn insert_switch<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let default_block = insert_term_block(mir, default);
     let source_info = source_info(mir);
 
-    let temp_decl = LocalDecl::new_temp(tcx.types.u32, mir.span);
+    let temp_decl = LocalDecl::new_temp(tcx.types.isize, mir.span);
     let temp = Place::Base(PlaceBase::Local(Local::new(mir.local_decls.len())));
     mir.local_decls.push(temp_decl);
     let self_place = Place::Base(PlaceBase::Local(self_arg()));
@@ -604,7 +608,7 @@ fn insert_switch<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
 
     let switch = TerminatorKind::SwitchInt {
         discr: Operand::Move(temp),
-        switch_ty: tcx.types.u32,
+        switch_ty: tcx.types.isize,
         values: Cow::from(cases.iter().map(|&(i, _)| i.index() as u128).collect::<Vec<_>>()),
         targets: cases.iter().map(|&(_, d)| d).chain(once(default_block)).collect(),
     };

@@ -104,6 +104,7 @@ impl<'a, 'tcx: 'a, V: CodegenObject> PlaceRef<'tcx, V> {
         self, bx: &mut Bx,
         ix: usize,
     ) -> Self {
+        debug!("project_field({}), layout={:?}", ix, self.layout);
         let field = self.layout.field(bx.cx(), ix);
         let offset = self.layout.fields.offset(ix);
         let effective_field_align = self.align.restrict_for_offset(offset);
@@ -212,6 +213,7 @@ impl<'a, 'tcx: 'a, V: CodegenObject> PlaceRef<'tcx, V> {
         bx: &mut Bx,
         cast_to: Ty<'tcx>
     ) -> V {
+        debug!("codegen_get_discr(self={:?}, cast_to={:?})", self, cast_to);
         let cast_to = bx.cx().immediate_backend_type(bx.cx().layout_of(cast_to));
         if self.layout.abi.is_uninhabited() {
             return bx.cx().const_undef(cast_to);
@@ -283,6 +285,7 @@ impl<'a, 'tcx: 'a, V: CodegenObject> PlaceRef<'tcx, V> {
         bx: &mut Bx,
         variant_index: VariantIdx
     ) {
+        debug!("codegen_set_discr(variant_index={:?}), layout={:?}", variant_index, self.layout);
         if self.layout.for_variant(bx.cx(), variant_index).abi.is_uninhabited() {
             return;
         }
@@ -296,9 +299,14 @@ impl<'a, 'tcx: 'a, V: CodegenObject> PlaceRef<'tcx, V> {
                 ..
             } => {
                 let ptr = self.project_field(bx, discr_index);
-                let to = self.layout.ty.ty_adt_def().unwrap()
-                    .discriminant_for_variant(bx.tcx(), variant_index)
-                    .val;
+                let to = match self.layout.ty.sty {
+                    ty::TyKind::Adt(adt_def, _) => adt_def
+                        .discriminant_for_variant(bx.tcx(), variant_index)
+                        .val,
+                    // Generators don't have explicit discriminant values.
+                    ty::TyKind::Generator(..) => variant_index.as_u32() as u128,
+                    _ => bug!(),
+                };
                 bx.store(
                     bx.cx().const_uint_big(bx.cx().backend_type(ptr.layout), to),
                     ptr.llval,

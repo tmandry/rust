@@ -484,7 +484,7 @@ impl<'a, 'gcx, 'tcx> GeneratorSubsts<'tcx> {
 
     /// This is the type of the variant tag field.
     pub fn variant_tag_ty(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Ty<'tcx> {
-        tcx.types.u32
+        tcx.types.isize
     }
 
     /// This is the index of the discriminant in the generator fields.
@@ -494,7 +494,7 @@ impl<'a, 'gcx, 'tcx> GeneratorSubsts<'tcx> {
 
     /// This is the types of the fields of a generate which
     /// is available before the generator transformation.
-    /// It includes the upvars and the state discriminant which is u32.
+    /// It includes the upvars and the state discriminant.
     pub fn pre_transforms_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) ->
         impl Iterator<Item=Ty<'tcx>> + 'a
     {
@@ -502,7 +502,7 @@ impl<'a, 'gcx, 'tcx> GeneratorSubsts<'tcx> {
     }
 
     /// This is the types of all the fields stored in a generator.
-    /// It includes the upvars, state types and the state discriminant which is u32.
+    /// It includes the upvars, state types and the state discriminant.
     pub fn field_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) ->
         impl Iterator<Item=Ty<'tcx>> + Captures<'gcx> + 'a
     {

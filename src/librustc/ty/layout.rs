@@ -639,7 +639,7 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                     _ => bug!(),
                 };
 
-                tcx.intern_layout(LayoutDetails {
+                let layout = tcx.intern_layout(LayoutDetails {
                     variants: Variants::Multiple {
                         discr,
                         discr_kind: DiscriminantKind::Tag,
@@ -650,7 +650,9 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                     abi,
                     size,
                     align,
-                })
+                });
+                debug!("generator layout: {:#?}", layout);
+                layout
             }
 
             ty::Closure(def_id, ref substs) => {
@@ -1687,6 +1689,14 @@ impl<'a, 'tcx, C> TyLayoutMethods<'tcx, C> for Ty<'tcx>
 
     fn field(this: TyLayout<'tcx>, cx: &C, i: usize) -> C::TyLayout {
         let tcx = cx.tcx();
+        let handle_discriminant = |discr: &Scalar| -> C::TyLayout {
+            let layout = LayoutDetails::scalar(cx, discr.clone());
+            MaybeResult::from_ok(TyLayout {
+                details: tcx.intern_layout(layout),
+                ty: discr.value.to_ty(tcx)
+            })
+        };
+
         cx.layout_of(match this.ty.sty {
             ty::Bool |
             ty::Char |
@@ -1761,7 +1771,19 @@ impl<'a, 'tcx, C> TyLayoutMethods<'tcx, C> for Ty<'tcx>
             }
 
             ty::Generator(def_id, ref substs, _) => {
-                substs.prefix_tys(def_id, tcx).nth(i).unwrap()
+                match this.variants {
+                    Variants::Single { index } => {
+                        substs.variants_tys(def_id, tcx)
+                            .nth(index.as_usize()).unwrap()
+                            .nth(i).unwrap()
+                    }
+                    Variants::Multiple { ref discr, discr_index, .. } => {
+                        if i == discr_index {
+                            return handle_discriminant(discr);
+                        }
+                        substs.prefix_tys(def_id, tcx).nth(i).unwrap()
+                    }
+                }
             }
 
             ty::Tuple(tys) => tys[i],
@@ -1781,11 +1803,7 @@ impl<'a, 'tcx, C> TyLayoutMethods<'tcx, C> for Ty<'tcx>
                     // Discriminant field for enums (where applicable).
                     Variants::Multiple { ref discr, .. } => {
                         assert_eq!(i, 0);
-                        let layout = LayoutDetails::scalar(cx, discr.clone());
-                        return MaybeResult::from_ok(TyLayout {
-                            details: tcx.intern_layout(layout),
-                            ty: discr.value.to_ty(tcx)
-                        });
+                        return handle_discriminant(discr);
                     }
                 }
             }
