@@ -298,14 +298,10 @@ static_assert!(MEM_SIZE_OF_TY_KIND: ::std::mem::size_of::<TyKind<'_>>() == 24);
 ///
 /// ## Generators
 ///
-/// Perhaps surprisingly, `ClosureSubsts` are also used for
-/// generators. In that case, what is written above is only half-true
-/// -- the set of type parameters is similar, but the role of CK and
-/// CS are different. CK represents the "yield type" and CS
-/// represents the "return type" of the generator.
-///
-/// It'd be nice to split this struct into ClosureSubsts and
-/// GeneratorSubsts, I believe. -nmatsakis
+/// Generators are handled similarly in `GeneratorSubsts`.  The set of
+/// type parameters is similar, but the role of CK and CS are
+/// different. CK represents the "yield type" and CS represents the
+/// "return type" of the generator.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash,
          Debug, RustcEncodable, RustcDecodable, HashStable)]
 pub struct ClosureSubsts<'tcx> {
@@ -391,6 +387,7 @@ impl<'tcx> ClosureSubsts<'tcx> {
     }
 }
 
+/// Similar to `ClosureSubsts`; see the above documentation for more.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug,
          RustcEncodable, RustcDecodable, HashStable)]
 pub struct GeneratorSubsts<'tcx> {
