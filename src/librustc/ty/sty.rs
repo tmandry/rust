@@ -467,6 +467,11 @@ impl<'tcx> GeneratorSubsts<'tcx> {
 }
 
 impl<'a, 'gcx, 'tcx> GeneratorSubsts<'tcx> {
+    /// The type of the state "discriminant" used in the generator type.
+    pub fn discr_ty(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>) -> Ty<'tcx> {
+        tcx.types.u32
+    }
+
     /// This returns the types of the MIR locals which had to be stored across suspension points.
     /// It is calculated in rustc_mir::transform::generator::StateTransform.
     /// All the types here must be in the tuple in GeneratorInterior.
@@ -481,15 +486,15 @@ impl<'a, 'gcx, 'tcx> GeneratorSubsts<'tcx> {
 
     /// This is the types of the fields of a generate which
     /// is available before the generator transformation.
-    /// It includes the upvars and the state discriminant which is u32.
+    /// It includes the upvars and the state discriminant.
     pub fn pre_transforms_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) ->
         impl Iterator<Item=Ty<'tcx>> + 'a
     {
-        self.upvar_tys(def_id, tcx).chain(iter::once(tcx.types.u32))
+        self.upvar_tys(def_id, tcx).chain(iter::once(self.discr_ty(tcx)))
     }
 
     /// This is the types of all the fields stored in a generator.
-    /// It includes the upvars, state types and the state discriminant which is u32.
+    /// It includes the upvars, state types and the state discriminant.
     pub fn field_tys(self, def_id: DefId, tcx: TyCtxt<'a, 'gcx, 'tcx>) ->
         impl Iterator<Item=Ty<'tcx>> + Captures<'gcx> + 'a
     {
