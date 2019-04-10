@@ -633,7 +633,8 @@ pub fn type_metadata(
                                    usage_site_span).finalize(cx)
         }
         ty::Generator(def_id, substs,  _) => {
-            let upvar_tys : Vec<_> = substs.field_tys(def_id, cx.tcx).map(|t| {
+            // TODO handle variant fields
+            let upvar_tys : Vec<_> = substs.prefix_tys(def_id, cx.tcx).map(|t| {
                 cx.tcx.normalize_erasing_regions(ParamEnv::reveal_all(), t)
             }).collect();
             // TODO use prepare_enum_metadata and update it to handle multiple

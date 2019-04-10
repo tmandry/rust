@@ -2026,6 +2026,10 @@ impl<'tcx> Place<'tcx> {
             variant_index))
     }
 
+    pub fn downcast_unnamed(self, variant_index: VariantIdx) -> Place<'tcx> {
+        self.elem(ProjectionElem::Downcast(None, variant_index))
+    }
+
     pub fn index(self, index: Local) -> Place<'tcx> {
         self.elem(ProjectionElem::Index(index))
     }
@@ -2475,11 +2479,6 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                                 for (freevar, place) in freevars.iter().zip(places) {
                                     let var_name = tcx.hir().name(freevar.var_id());
                                     struct_fmt.field(&var_name.as_str(), place);
-                                }
-                                struct_fmt.field("$state", &places[freevars.len()]);
-                                for i in (freevars.len() + 1)..places.len() {
-                                    struct_fmt
-                                        .field(&format!("${}", i - freevars.len() - 1), &places[i]);
                                 }
                             });
 
