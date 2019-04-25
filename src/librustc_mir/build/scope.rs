@@ -99,10 +99,18 @@ pub struct Scope<'tcx> {
     /// the span of that region_scope
     region_scope_span: Span,
 
-    /// Whether we need landing pads for the cleanup path, that is,
+    /// Whether there's anything to do for the cleanup path, that is,
     /// when unwinding through this scope. This includes destructors,
-    /// but not StorageDead statements.
-    cleanup_may_panic: bool,
+    /// but not StorageDead statements, which don't get emitted at all
+    /// for unwinding, for several reasons:
+    ///  * clang doesn't emit llvm.lifetime.end for C++ unwinding
+    ///  * LLVM's memory dependency analysis can't handle it atm
+    ///  * polluting the cleanup MIR with StorageDead creates
+    ///    landing pads even though there's no actual destructors
+    ///  * freeing up stack space has no effect during unwinding
+    /// Note that for generators we do emit StorageDeads, for the
+    /// use of optimizations in the MIR generator transform.
+    needs_cleanup: bool,
 
     /// set of places to drop when exiting this scope. This starts
     /// out empty but grows as variables are declared during the
@@ -323,7 +331,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             source_scope: vis_scope,
             region_scope: region_scope.0,
             region_scope_span: region_scope.1.span,
-            cleanup_may_panic: false,
+            needs_cleanup: true,
             drops: vec![],
             cached_generator_drop: None,
             cached_exits: Default::default(),
@@ -385,7 +393,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
 
         // If we are emitting a `drop` statement, we need to have the cached
         // diverge cleanup pads ready in case that drop panics.
-        let may_panic = self.scopes[(len - scope_count)..].iter().any(|s| s.cleanup_may_panic);
+        let may_panic = self.scopes[(len - scope_count)..].iter().any(|s| s.needs_cleanup);
         if may_panic {
             self.diverge_cleanup();
         }
@@ -449,6 +457,10 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
         let result = block;
 
         while let Some(scope) = scopes.next() {
+            if !scope.needs_cleanup && !self.is_generator {
+                continue;
+            }
+
             block = if let Some(b) = scope.cached_generator_drop {
                 self.cfg.terminate(block, src_info,
                                    TerminatorKind::Goto { target: b });
@@ -587,7 +599,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
 
     // Schedule an abort block - this is used for some ABIs that cannot unwind
     pub fn schedule_abort(&mut self) -> BasicBlock {
-        self.scopes[0].cleanup_may_panic = true;
+        self.scopes[0].needs_cleanup = true;
         let abortblk = self.cfg.start_new_cleanup_block();
         let source_info = self.scopes[0].source_info(self.fn_span);
         self.cfg.terminate(abortblk, source_info, TerminatorKind::Abort);
@@ -699,7 +711,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             scope.invalidate_cache(!needs_drop, this_scope);
             if this_scope {
                 if let DropKind::Value { .. } = drop_kind {
-                    scope.cleanup_may_panic = true;
+                    scope.needs_cleanup = true;
                 }
 
                 let region_scope_span = region_scope.span(self.hir.tcx(),
@@ -766,7 +778,7 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
 
         for scope in self.scopes[first_uncached..].iter_mut() {
             target = build_diverge_scope(&mut self.cfg, scope.region_scope_span,
-                                         scope, target);
+                                         scope, target, self.is_generator);
         }
 
         target
@@ -913,7 +925,8 @@ fn build_scope_drops<'tcx>(
 fn build_diverge_scope(cfg: &mut CFG<'tcx>,
                        span: Span,
                        scope: &mut Scope<'tcx>,
-                       mut target: BasicBlock)
+                       mut target: BasicBlock,
+                       is_generator: bool)
                        -> BasicBlock
 {
     // Build up the drops in **reverse** order. The end result will
@@ -944,7 +957,7 @@ fn build_diverge_scope(cfg: &mut CFG<'tcx>,
     for (j, drop_data) in scope.drops.iter_mut().enumerate() {
         debug!("build_diverge_scope drop_data[{}]: {:?}", j, drop_data);
         // Only full value drops are emitted in the diverging path,
-        // not StorageDead.
+        // not StorageDead, except in the case of generators.
         //
         // Note: This may not actually be what we desire (are we
         // "freeing" stack storage as we unwind, or merely observing a
@@ -952,7 +965,7 @@ fn build_diverge_scope(cfg: &mut CFG<'tcx>,
         // match the behavior of clang, but on inspection eddyb says
         // this is not what clang does.
         match drop_data.kind {
-            DropKind::Storage => {
+            DropKind::Storage if is_generator => {
                 // Only temps and vars need their storage dead.
                 match drop_data.location {
                     Place::Base(PlaceBase::Local(index)) => {
@@ -964,6 +977,7 @@ fn build_diverge_scope(cfg: &mut CFG<'tcx>,
                     _ => unreachable!(),
                 };
             }
+            DropKind::Storage => {}
             DropKind::Value { ref mut cached_block } => {
                 let cached_block = cached_block.ref_mut();
                 target = if let Some(cached_block) = *cached_block {
