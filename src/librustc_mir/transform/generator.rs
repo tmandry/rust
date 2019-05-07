@@ -659,64 +659,39 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         }
     }
 
+    let dummy_local = LocalDecl::new_internal(tcx.mk_unit(), mir.span);
+
+    // Gather live locals and their indices replacing values in mir.local_decls with a dummy
+    // to avoid changing local indices
+    let live_decls = live_locals.iter().map(|local| {
+        let var = mem::replace(&mut mir.local_decls[local], dummy_local.clone());
+        (local, var)
+    });
+
+    // For now we will access everything via variant #3, leaving empty variants
+    // for the UNRESUMED, RETURNED, and POISONED states.
+    // If there were a yield-less generator without a variant #3, it would not
+    // have any vars to remap, so we would never use this.
+    let variant_index = VariantIdx::new(3);
+
     // Create a map from local indices to generator struct indices.
     // We also create a vector of the LocalDecls of these locals.
     let mut remap = FxHashMap::default();
     let mut decls = IndexVec::new();
-
-    let dummy_local = LocalDecl::new_internal(tcx.mk_unit(), mir.span);
-    let mut remap_field = |local, variant_index, field_index| -> GeneratorSavedLocal {
-        // Replace values in mir.local_decls with a dummy to avoid changing
-        // local indices.
-        let field = mem::replace(&mut mir.local_decls[local], dummy_local.clone());
-        // These fields follow the prefix fields.
-        remap.insert(local, (field.ty, variant_index, field_index));
-
-        let saved_local = GeneratorSavedLocal::from(decls.len());
-        decls.push(field);
-        saved_local
-    };
-
-    // Start with the "prefix" fields, which are in every variant. We use the
-    // first variant with vars in it for all these locals.
-    // (It is safe to assume this variant exists. If a generator exitsted with
-    // no yields and thus no suspend variants, we would never have any vars live
-    // across yields to store.)
-    const INITIAL_VARIANTS: usize = 3;
-    let prefix_variant = VariantIdx::new(INITIAL_VARIANTS);
-    for (idx, local) in prefix_locals.iter().enumerate() {
-        remap_field(local, prefix_variant, idx);
+    for (idx, (local, var)) in live_decls.enumerate() {
+        remap.insert(local, (var.ty, variant_index, idx));
+        decls.push(var);
     }
-    let prefix_fields = (0..prefix_locals.count()).map(GeneratorSavedLocal::from);
-
-    // Build up the list of fields for each variant. Start with empty variants
-    // for the Unresumed, Returned, and Poisoned states.
-    let mut variant_fields = iter::repeat(IndexVec::new())
-        .take(INITIAL_VARIANTS)
-        .collect::<IndexVec<VariantIdx, _>>();
-    for (variant, block) in suspending_blocks.iter().enumerate() {
-        let variant_index = VariantIdx::new(INITIAL_VARIANTS + variant);
-        let mut fields = prefix_fields.clone().collect::<IndexVec<Field, _>>();
-
-        if let Some(assigned) = variant_assignments.get(&block) {
-            for (idx, local) in assigned.iter().enumerate() {
-                let saved_local = remap_field(
-                    local,
-                    variant_index,
-                    // These fields go after the prefix fields in our variant.
-                    prefix_fields.len() + idx);
-                fields.push(saved_local);
-            }
-        }
-
-        assert_eq!(variant_fields.next_index(), variant_index);
-        variant_fields.push(fields);
-    }
-
     let field_tys = decls.iter().map(|field| field.ty).collect::<IndexVec<_, _>>();
+
+    // Put every var in each variant, for now.
+    let all_vars = (0..field_tys.len()).map(GeneratorSavedLocal::from).collect();
+    let empty_variants = iter::repeat(IndexVec::new()).take(3);
+    let state_variants = iter::repeat(all_vars).take(suspending_blocks.count());
+
     let layout = GeneratorLayout {
         field_tys,
-        variant_fields,
+        variant_fields: empty_variants.chain(state_variants).collect(),
         __local_debuginfo_codegen_only_do_not_use: decls,
     };
 
