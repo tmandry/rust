@@ -61,7 +61,7 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::indexed_vec::{Idx, IndexVec};
 use rustc_data_structures::bit_set::BitSet;
 use std::borrow::Cow;
-use std::collections::hash_map;
+//use std::collections::hash_map;
 use std::iter;
 use std::mem;
 use crate::transform::{MirPass, MirSource};
@@ -396,8 +396,7 @@ fn locals_live_across_suspend_points(
     movable: bool,
 ) -> (
     liveness::LiveVarSet,
-    FxHashMap<BasicBlock, liveness::LiveVarSet>,
-    liveness::LiveVarSet,
+    IndexVec<GeneratorSavedLocal, BitSet<GeneratorSavedLocal>>,
     FxHashMap<BasicBlock, liveness::LiveVarSet>,
     BitSet<BasicBlock>,
 ) {
@@ -501,65 +500,75 @@ fn locals_live_across_suspend_points(
     // The generator argument is ignored
     set.remove(self_arg());
 
-    let (variant_assignments, prefix_locals) = locals_eligible_for_overlap(
+    let can_overlap = locals_eligible_for_overlap(
         mir,
         &set,
-        &storage_liveness_map,
         &ignored,
         storage_live,
         storage_live_analysis);
 
-    (set, variant_assignments, prefix_locals, storage_liveness_map, suspending_blocks)
+    (set, can_overlap, storage_liveness_map, suspending_blocks)
+}
+
+fn renumber_bitset(stored_locals: &liveness::LiveVarSet, input: &BitSet<Local>)
+-> BitSet<GeneratorSavedLocal> {
+    let mut out = BitSet::new_empty(stored_locals.count());
+    for (idx, local) in stored_locals.iter().enumerate() {
+        let saved_local = GeneratorSavedLocal::from(idx);
+        if input.contains(local) {
+            out.insert(saved_local);
+        }
+    }
+    out
 }
 
 fn locals_eligible_for_overlap(
     mir: &'mir Mir<'tcx>,
     stored_locals: &liveness::LiveVarSet,
-    storage_liveness_map: &FxHashMap<BasicBlock, liveness::LiveVarSet>,
     ignored: &StorageIgnored,
     storage_live: DataflowResults<'tcx, MaybeStorageLive<'mir, 'tcx>>,
     storage_live_analysis: MaybeStorageLive<'mir, 'tcx>,
-) -> (FxHashMap<BasicBlock, liveness::LiveVarSet>, liveness::LiveVarSet) {
+) -> IndexVec<GeneratorSavedLocal, BitSet<GeneratorSavedLocal>> {
     debug!("locals_eligible_for_overlap({:?})", mir.span);
     debug!("ignored = {:?}", ignored.0);
 
-    let mut candidate_locals = stored_locals.clone();
+    let mut eligible_locals = stored_locals.clone();
     // Storage ignored locals are not candidates, since their storage is always
     // live. Remove these.
-    candidate_locals.subtract(&ignored.0);
+    eligible_locals.subtract(&ignored.0);
 
-    let mut eligible_locals = candidate_locals.clone();
+    //let mut eligible_locals = candidate_locals.clone();
     debug!("eligible_locals = {:?}", eligible_locals);
 
     // Figure out which of our candidate locals are storage live across only one
     // suspension point. There will be an entry for each candidate (`None` if it
     // is live across more than one).
-    let mut variants_map: FxHashMap<Local, Option<BasicBlock>> = FxHashMap::default();
-    for (block, locals) in storage_liveness_map {
-        let mut live_locals = candidate_locals.clone();
-        live_locals.intersect(&locals);
-        for local in live_locals.iter() {
-            match variants_map.entry(local) {
-                hash_map::Entry::Occupied(mut entry) => {
-                    // We've already seen this local at another suspension
-                    // point, so it is no longer a candidate.
-                    debug!("removing local {:?} with live storage across >1 yield ({:?}, {:?})",
-                           local, block, entry.get());
-                    *entry.get_mut() = None;
-                    eligible_locals.remove(local);
-                }
-                hash_map::Entry::Vacant(entry) => {
-                    entry.insert(Some(*block));
-                }
-            }
-        }
-    }
+    //let mut variants_map: FxHashMap<Local, Option<BasicBlock>> = FxHashMap::default();
+    //for (block, locals) in storage_liveness_map {
+    //    let mut live_locals = candidate_locals.clone();
+    //    live_locals.intersect(&locals);
+    //    for local in live_locals.iter() {
+    //        match variants_map.entry(local) {
+    //            hash_map::Entry::Occupied(mut entry) => {
+    //                // We've already seen this local at another suspension
+    //                // point, so it is no longer a candidate.
+    //                debug!("removing local {:?} with live storage across >1 yield ({:?}, {:?})",
+    //                       local, block, entry.get());
+    //                *entry.get_mut() = None;
+    //                eligible_locals.remove(local);
+    //            }
+    //            hash_map::Entry::Vacant(entry) => {
+    //                entry.insert(Some(*block));
+    //            }
+    //        }
+    //    }
+    //}
 
     // Of our remaining candidates, find out if any have overlapping storage
     // liveness. Those that do must be in the same variant to remain candidates.
     // TODO revisit data structures here. should this be a sparse map? what
     // about the bitset?
-    let mut local_overlaps: IndexVec<Local, _> =
+    let mut local_conflicts: IndexVec<Local, _> =
         iter::repeat(liveness::LiveVarSet::new_empty(mir.local_decls.len()))
         .take(mir.local_decls.len())
         .collect();
@@ -572,7 +581,7 @@ fn locals_eligible_for_overlap(
             for local in eligible_storage_live.iter() {
                 let mut overlaps = eligible_storage_live.clone();
                 overlaps.remove(local);
-                local_overlaps[local].union(&overlaps);
+                local_conflicts[local].union(&overlaps);
 
                 if !overlaps.is_empty() {
                     trace!("local {:?} overlaps with these locals at {:?}: {:?}",
@@ -582,42 +591,57 @@ fn locals_eligible_for_overlap(
         });
     }
 
-    for (local, overlaps) in local_overlaps.iter_enumerated() {
-        // This local may have been deemed ineligible already.
-        if !eligible_locals.contains(local) {
-            continue;
-        }
-
-        for other_local in overlaps.iter() {
-            // local and other_local have overlapping storage, therefore they
-            // cannot overlap in the generator layout. The only way to guarantee
-            // this is if they are in the same variant, or one is ineligible
-            // (which means it is stored in every variant).
-            if eligible_locals.contains(other_local) &&
-                variants_map[&local] != variants_map[&other_local] {
-                // We arbitrarily choose other_local, which will be the higher
-                // indexed of the two locals, to remove.
-                eligible_locals.remove(other_local);
-                debug!("removing local {:?} due to overlap", other_local);
+    let storage_conflicts: IndexVec<GeneratorSavedLocal, _> = stored_locals
+        .iter()
+        .map(|local_a| {
+            if let Some(conflicts) = local_conflicts.get(local_a) {
+                // Keep overlap information only for stored locals.
+                renumber_bitset(conflicts, stored_locals)
+            } else {
+                // If our local is not in local_conflicts then it is not
+                // eligible for overlap with other locals.
+                BitSet::new_filled(stored_locals.count())
             }
-        }
-    }
+        })
+        .collect();
 
-    let mut assignments = FxHashMap::default();
-    for local in eligible_locals.iter() {
-        assignments
-            .entry(variants_map[&local].unwrap())
-            .or_insert(liveness::LiveVarSet::new_empty(mir.local_decls.len()))
-            .insert(local);
-    }
+    //for (local, overlaps) in local_conflicts.iter_enumerated() {
+    //    // This local may have been deemed ineligible already.
+    //    if !eligible_locals.contains(local) {
+    //        continue;
+    //    }
 
-    let mut ineligible_locals = stored_locals.clone();
-    ineligible_locals.subtract(&eligible_locals);
+    //    for other_local in overlaps.iter() {
+    //        // local and other_local have overlapping storage, therefore they
+    //        // cannot overlap in the generator layout. The only way to guarantee
+    //        // this is if they are in the same variant, or one is ineligible
+    //        // (which means it is stored in every variant).
+    //        if eligible_locals.contains(other_local) &&
+    //            variants_map[&local] != variants_map[&other_local] {
+    //            // We arbitrarily choose other_local, which will be the higher
+    //            // indexed of the two locals, to remove.
+    //            eligible_locals.remove(other_local);
+    //            debug!("removing local {:?} due to overlap", other_local);
+    //        }
+    //    }
+    //}
 
-    debug!("locals_eligible_for_overlap() => (assignments: {:?}, eligible_locals: {:?}",
-           assignments, eligible_locals);
+    //let mut assignments = FxHashMap::default();
+    //for local in eligible_locals.iter() {
+    //    assignments
+    //        .entry(variants_map[&local].unwrap())
+    //        .or_insert(liveness::LiveVarSet::new_empty(mir.local_decls.len()))
+    //        .insert(local);
+    //}
 
-    (assignments, ineligible_locals)
+    //let mut ineligible_locals = stored_locals.clone();
+    //ineligible_locals.subtract(&eligible_locals);
+
+    //debug!("locals_eligible_for_overlap() => (assignments: {:?}, eligible_locals: {:?}",
+    //       assignments, eligible_locals);
+
+    //(assignments, ineligible_locals)
+    storage_conflicts
 }
 
 fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
@@ -631,7 +655,7 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         FxHashMap<BasicBlock, liveness::LiveVarSet>)
 {
     // Use a liveness analysis to compute locals which are live across a suspension point
-    let (live_locals, variant_assignments, prefix_locals, storage_liveness, suspending_blocks) =
+    let (live_locals, storage_conflicts, storage_liveness, suspending_blocks) =
         locals_live_across_suspend_points(tcx, mir, source, movable);
 
     // Erase regions from the types passed in from typeck so we can compare them with
@@ -692,6 +716,7 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let layout = GeneratorLayout {
         field_tys,
         variant_fields: empty_variants.chain(state_variants).collect(),
+        storage_conflicts,
         __local_debuginfo_codegen_only_do_not_use: decls,
     };
 
