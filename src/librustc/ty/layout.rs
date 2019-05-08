@@ -14,6 +14,9 @@ use std::ops::Bound;
 
 use crate::hir;
 use crate::ich::StableHashingContext;
+use crate::mir::GeneratorSavedLocal;
+use crate::ty::subst::Subst;
+use rustc_data_structures::bit_set::BitSet;
 use rustc_data_structures::indexed_vec::{IndexVec, Idx};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher,
                                            StableHasherResult};
@@ -606,34 +609,142 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
             }
 
             ty::Generator(def_id, ref substs, _) => {
-                // FIXME(tmandry): For fields that are repeated in multiple
-                // variants in the GeneratorLayout, we need code to ensure that
-                // the offset of these fields never change. Right now this is
-                // not an issue since every variant has every field, but once we
-                // optimize this we have to be more careful.
+                let info = tcx.generator_layout(def_id);
+                let subst_field = |ty: Ty<'tcx>| { ty.subst(tcx, substs.substs) };
 
+                #[derive(Clone)]
+                enum SavedLocalEligibility {
+                    Unassigned,
+                    Assigned(VariantIdx),
+                    Ineligible(Option<u32>),
+                }
+                use SavedLocalEligibility::*;
+
+                // The saved locals not eligible for overlap. These will get
+                // "promoted" to the prefix of our generator.
+                let mut ineligible_locals = BitSet::new_empty(info.field_tys.len());
+
+                // Figure out which of our saved locals are fields in only
+                // one variant.
+                let mut assignments: IndexVec<GeneratorSavedLocal, SavedLocalEligibility> =
+                    iter::repeat(Unassigned)
+                    .take(info.field_tys.len())
+                    .collect();
+                for (variant_index, fields) in info.variant_fields.iter_enumerated() {
+                    for local in fields {
+                        match assignments[*local] {
+                            Unassigned => assignments[*local] = Assigned(variant_index),
+                            Assigned(idx) => {
+                                // We've already seen this local at another suspension
+                                // point, so it is no longer a candidate.
+                                debug!("removing local {:?} in >1 variant ({:?}, {:?})",
+                                       local, variant_index, idx);
+                                assignments[*local] = Ineligible(None);
+                                ineligible_locals.insert(*local);
+                            }
+                            Ineligible(_) => {},
+                        }
+                    }
+                }
+
+                // Next, check every pair of eligible fields to see if it
+                // conflicts with another eligible field.
+                // TODO
+
+                // Write down the order of our locals that will be promoted to
+                // the prefix.
+                for (idx, local) in ineligible_locals.iter().enumerate() {
+                    assignments[local] = Ineligible(Some(idx as u32));
+                }
+
+                // Build a prefix layout, including "promoting" all ineligible
+                // locals as part of the prefix.
                 let discr_index = substs.prefix_tys(def_id, tcx).count();
+                let promoted_tys =
+                    ineligible_locals.iter().map(|local| subst_field(info.field_tys[local]));
                 let prefix_tys = substs.prefix_tys(def_id, tcx)
-                    .chain(iter::once(substs.discr_ty(tcx)));
+                    .chain(iter::once(substs.discr_ty(tcx)))
+                    .chain(promoted_tys);
                 let prefix = univariant_uninterned(
                     &prefix_tys.map(|ty| self.layout_of(ty)).collect::<Result<Vec<_>, _>>()?,
                     &ReprOptions::default(),
                     StructKind::AlwaysSized)?;
+                let (prefix_size, prefix_align) = (prefix.size, prefix.align);
+
+                // Split the prefix layout into the "outer" fields (upvars and
+                // discriminant) and the "promoted" fields. Promoted fields will
+                // get included in each variant that requested them in
+                // GeneratorLayout.
+                let (outer_fields, promoted_offsets, promoted_memory_index) = match prefix.fields {
+                    FieldPlacement::Arbitrary { offsets, memory_index } => {
+                        let (offsets_a, offsets_b) =
+                            offsets.split_at(discr_index + 1);
+                        let (memory_index_a, memory_index_b) =
+                            memory_index.split_at(discr_index + 1);
+                        let outer_fields = FieldPlacement::Arbitrary {
+                            offsets: offsets_a.to_vec(), memory_index: memory_index_a.to_vec()
+                        };
+                        (outer_fields, offsets_b.to_vec(), memory_index_b.to_vec())
+                    }
+                    _ => bug!(),
+                };
 
                 let mut size = prefix.size;
                 let mut align = prefix.align;
-                let variants_tys = substs.state_tys(def_id, tcx);
-                let variants = variants_tys.enumerate().map(|(i, variant_tys)| {
-                    let mut variant = univariant_uninterned(
-                        &variant_tys.map(|ty| self.layout_of(ty)).collect::<Result<Vec<_>, _>>()?,
-                        &ReprOptions::default(),
-                        StructKind::Prefixed(prefix.size, prefix.align.abi))?;
+                let variants = info.variant_fields.iter_enumerated().map(|(index, variant_fields)| {
+                    // Only include overlap-eligible fields when we compute our variant layout.
+                    let variant_only_tys = variant_fields.iter().flat_map(|local| {
+                        let ty = info.field_tys[*local];
+                        match assignments[*local] {
+                            Unassigned => bug!("all locals should have an assignment"),
+                            Assigned(v) if v == index => Some(subst_field(ty)),
+                            Assigned(_) => bug!(),
+                            Ineligible(_) => None,
+                        }
+                    });
 
-                    variant.variants = Variants::Single { index: VariantIdx::new(i) };
+                    let mut variant = univariant_uninterned(
+                        &variant_only_tys
+                            .map(|ty| self.layout_of(ty))
+                            .collect::<Result<Vec<_>, _>>()?,
+                        &ReprOptions::default(),
+                        StructKind::Prefixed(prefix_size, prefix_align.abi))?;
+                    variant.variants = Variants::Single { index };
+
+                    let (offsets, memory_index) = match variant.fields {
+                        FieldPlacement::Arbitrary { offsets, memory_index } =>
+                            (offsets, memory_index),
+                        _ => bug!(),
+                    };
+
+                    // Now, stitch the promoted and variant-only fields back
+                    // together in the order they are mentioned by our
+                    // GeneratorLayout.
+                    let mut next_variant_field = 0;
+                    let mut combined_offsets = Vec::new();
+                    let mut combined_memory_index = Vec::new();
+                    for local in variant_fields.iter() {
+                        match assignments[*local] {
+                            Unassigned => bug!("all locals should have an assignment"),
+                            Assigned(_) => {
+                                combined_offsets.push(offsets[next_variant_field]);
+                                combined_memory_index.push(memory_index[next_variant_field]);
+                                next_variant_field += 1;
+                            }
+                            Ineligible(field_idx) => {
+                                let field_idx = field_idx.unwrap() as usize;
+                                combined_offsets.push(promoted_offsets[field_idx]);
+                                combined_memory_index.push(promoted_memory_index[field_idx]);
+                            }
+                        }
+                    }
+                    variant.fields = FieldPlacement::Arbitrary {
+                        offsets: combined_offsets,
+                        memory_index: combined_memory_index,
+                    };
 
                     size = size.max(variant.size);
                     align = align.max(variant.align);
-
                     Ok(variant)
                 }).collect::<Result<IndexVec<VariantIdx, _>, _>>()?;
 
@@ -655,7 +766,7 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                         discr_index,
                         variants,
                     },
-                    fields: prefix.fields,
+                    fields: outer_fields,
                     abi,
                     size,
                     align,
