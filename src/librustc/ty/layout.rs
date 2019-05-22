@@ -711,7 +711,7 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                 for (idx, local) in ineligible_locals.iter().enumerate() {
                     assignments[local] = Ineligible(Some(idx as u32));
                 }
-                debug!("generator saved local assignments: {:?}", assignments);
+                debug!("generator saved local assignments ({:?}): {:?}", ty, assignments);
 
                 // Build a prefix layout, including "promoting" all ineligible
                 // locals as part of the prefix.
@@ -848,7 +848,7 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                     size,
                     align,
                 });
-                debug!("generator layout: {:#?}", layout);
+                debug!("generator layout ({:?}): {:#?}", ty, layout);
                 layout
             }
 
