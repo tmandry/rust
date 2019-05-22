@@ -643,13 +643,11 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                 use SavedLocalEligibility::*;
 
                 let mut assignments: IndexVec<GeneratorSavedLocal, SavedLocalEligibility> =
-                    iter::repeat(Unassigned)
-                    .take(info.field_tys.len())
-                    .collect();
+                    IndexVec::from_elem_n(Unassigned, info.field_tys.len());
 
                 // The saved locals not eligible for overlap. These will get
                 // "promoted" to the prefix of our generator.
-                let mut eligible_locals = BitSet::new_filled(info.field_tys.len());
+                let mut ineligible_locals = BitSet::new_empty(info.field_tys.len());
 
                 // Figure out which of our saved locals are fields in only
                 // one variant. The rest are deemed ineligible for overlap.
@@ -664,7 +662,7 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                                 // point, so it is no longer a candidate.
                                 trace!("removing local {:?} in >1 variant ({:?}, {:?})",
                                        local, variant_index, idx);
-                                eligible_locals.remove(*local);
+                                ineligible_locals.insert(*local);
                                 assignments[*local] = Ineligible(None);
                             }
                             Ineligible(_) => {},
@@ -675,36 +673,35 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                 // Next, check every pair of eligible locals to see if they
                 // conflict.
                 for (local_a, conflicts_a) in info.storage_conflicts.iter_enumerated() {
-                    if !eligible_locals.contains(local_a) {
+                    if ineligible_locals.contains(local_a) {
                         continue;
                     }
 
                     for local_b in conflicts_a.iter() {
-                        // local_a and local_b have overlapping storage, therefore they
+                        // local_a and local_b are storage live at the same time, therefore they
                         // cannot overlap in the generator layout. The only way to guarantee
                         // this is if they are in the same variant, or one is ineligible
                         // (which means it is stored in every variant).
-                        if !eligible_locals.contains(local_b) ||
+                        if ineligible_locals.contains(local_b) ||
                             assignments[local_a] == assignments[local_b]
                         {
                             continue;
                         }
 
                         // If they conflict, we will choose one to make ineligible.
+                        // This is not always optimal; it's just a greedy heuristic
+                        // that seems to produce good results most of the time.
                         let conflicts_b = &info.storage_conflicts[local_b];
                         let (remove, other) = if conflicts_a.count() > conflicts_b.count() {
                             (local_a, local_b)
                         } else {
                             (local_b, local_a)
                         };
-                        eligible_locals.remove(remove);
+                        ineligible_locals.insert(remove);
                         assignments[remove] = Ineligible(None);
                         trace!("removing local {:?} due to conflict with {:?}", remove, other);
                     }
                 }
-
-                let mut ineligible_locals = BitSet::new_filled(info.field_tys.len());
-                ineligible_locals.subtract(&eligible_locals);
 
                 // Write down the order of our locals that will be promoted to
                 // the prefix.
@@ -763,15 +760,17 @@ impl<'a, 'tcx> LayoutCx<'tcx, TyCtxt<'a, 'tcx, 'tcx>> {
                 let mut align = prefix.align;
                 let variants = info.variant_fields.iter_enumerated().map(|(index, variant_fields)| {
                     // Only include overlap-eligible fields when we compute our variant layout.
-                    let variant_only_tys = variant_fields.iter().flat_map(|local| {
-                        let ty = info.field_tys[*local];
-                        match assignments[*local] {
-                            Unassigned => bug!(),
-                            Assigned(v) if v == index => Some(subst_field(ty)),
-                            Assigned(_) => bug!("assignment does not match variant"),
-                            Ineligible(_) => None,
-                        }
-                    });
+                    let variant_only_tys = variant_fields
+                        .iter()
+                        .filter(|local| {
+                            match assignments[**local] {
+                                Unassigned => bug!(),
+                                Assigned(v) if v == index => true,
+                                Assigned(_) => bug!("assignment does not match variant"),
+                                Ineligible(_) => false,
+                            }
+                        })
+                        .map(|local| subst_field(info.field_tys[*local]));
 
                     let mut variant = univariant_uninterned(
                         &variant_only_tys

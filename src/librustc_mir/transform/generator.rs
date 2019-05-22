@@ -547,14 +547,11 @@ fn compute_storage_conflicts(
         eligible_storage_live.intersect(&stored_locals);
 
         for local in eligible_storage_live.iter() {
-            let mut overlaps = eligible_storage_live.clone();
-            overlaps.remove(local);
-            local_conflicts[local].union(&overlaps);
+            local_conflicts[local].union(&eligible_storage_live);
+        }
 
-            if !overlaps.is_empty() {
-                trace!("at {:?}, local {:?} conflicts with {:?}",
-                       loc, local, overlaps);
-            }
+        if eligible_storage_live.count() > 1 {
+            trace!("at {:?}, eligible_storage_live={:?}", loc, eligible_storage_live);
         }
     });
 
@@ -665,11 +662,11 @@ fn compute_layout<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         let mut fields = IndexVec::new();
         for (idx, saved_local) in live_locals.iter().enumerate() {
             fields.push(saved_local);
-            // Note that if a field is included in multiple variants, it will be
-            // added overwritten here. That's fine; fields do not move around
-            // inside generators, so it doesn't matter which variant index we
-            // access them by.
-            remap.insert(locals[saved_local], (tys[saved_local], variant_index, idx));
+            // Note that if a field is included in multiple variants, we will
+            // just use the first one here. That's fine; fields do not move
+            // around inside generators, so it doesn't matter which variant
+            // index we access them by.
+            remap.entry(locals[saved_local]).or_insert((tys[saved_local], variant_index, idx));
         }
         variant_fields.push(fields);
     }
