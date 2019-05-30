@@ -218,7 +218,7 @@ impl<'tcx> Scope<'tcx> {
     /// `storage_only` controls whether to invalidate only drop paths that run `StorageDead`.
     /// `this_scope_only` controls whether to invalidate only drop paths that refer to the current
     /// top-of-scope (as opposed to dependent scopes).
-    fn invalidate_cache(&mut self, storage_only: bool, is_generator: bool, this_scope_only: bool) {
+    fn invalidate_cache(&mut self, _storage_only: bool, _is_generator: bool, this_scope_only: bool) {
         // FIXME: maybe do shared caching of `cached_exits` etc. to handle functions
         // with lots of `try!`?
 
@@ -228,7 +228,7 @@ impl<'tcx> Scope<'tcx> {
         // the current generator drop and unwind refer to top-of-scope
         self.cached_generator_drop = None;
 
-        let ignore_unwinds = storage_only && !is_generator;
+        let ignore_unwinds = false; //storage_only && !is_generator;
         if !ignore_unwinds {
             self.cached_unwind.invalidate();
         }
@@ -944,23 +944,23 @@ fn build_scope_drops<'tcx>(
 
 fn get_unwind_to<'tcx>(
     scope: &Scope<'tcx>,
-    is_generator: bool,
+    _is_generator: bool,
     unwind_from: usize,
     generator_drop: bool,
 ) -> Option<BasicBlock> {
     for drop_idx in (0..unwind_from).rev() {
         let drop_data = &scope.drops[drop_idx];
         match drop_data.kind {
-            DropKind::Storage { cached_block } if is_generator => {
+            DropKind::Storage { cached_block } /*if is_generator*/ => {
                 return Some(cached_block.get(generator_drop).unwrap_or_else(|| {
                     span_bug!(drop_data.span, "cached block not present for {:?}", drop_data)
                 }));
             }
-            DropKind::Value { cached_block } if !is_generator => {
-                return Some(cached_block.get(generator_drop).unwrap_or_else(|| {
-                    span_bug!(drop_data.span, "cached block not present for {:?}", drop_data)
-                }));
-            }
+            //DropKind::Value { cached_block } if !is_generator => {
+            //    return Some(cached_block.get(generator_drop).unwrap_or_else(|| {
+            //        span_bug!(drop_data.span, "cached block not present for {:?}", drop_data)
+            //    }));
+            //}
             _ => (),
         }
     }
@@ -972,7 +972,7 @@ fn build_diverge_scope<'tcx>(cfg: &mut CFG<'tcx>,
                              scope: &mut Scope<'tcx>,
                              mut target: BasicBlock,
                              generator_drop: bool,
-                             is_generator: bool)
+                             _is_generator: bool)
                              -> BasicBlock
 {
     // Build up the drops in **reverse** order. The end result will
@@ -1012,7 +1012,7 @@ fn build_diverge_scope<'tcx>(cfg: &mut CFG<'tcx>,
         // match the behavior of clang, but on inspection eddyb says
         // this is not what clang does.
         match drop_data.kind {
-            DropKind::Storage { ref mut cached_block } if is_generator => {
+            DropKind::Storage { ref mut cached_block } /*if is_generator*/ => {
                 // Only temps and vars need their storage dead.
                 match drop_data.location {
                     Place::Base(PlaceBase::Local(index)) => {
@@ -1034,7 +1034,7 @@ fn build_diverge_scope<'tcx>(cfg: &mut CFG<'tcx>,
                 }
                 *cached_block.ref_mut(generator_drop) = Some(target);
             }
-            DropKind::Storage { .. } => {}
+            //DropKind::Storage { .. } => {}
             DropKind::Value { ref mut cached_block } => {
                 let cached_block = cached_block.ref_mut(generator_drop);
                 target = if let Some(cached_block) = *cached_block {
