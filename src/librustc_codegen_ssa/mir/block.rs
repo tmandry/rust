@@ -803,6 +803,11 @@ impl<'a, 'tcx: 'a, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         debug!("codegen_block({:?}={:?})", bb, data);
 
         for statement in &data.statements {
+            if data.is_cleanup {
+                if let mir::StatementKind::StorageDead(_) = statement.kind {
+                    continue;
+                }
+            }
             bx = self.codegen_statement(bx, statement);
         }
 
