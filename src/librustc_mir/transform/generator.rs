@@ -440,16 +440,11 @@ fn locals_live_across_suspend_points(
 
     // Calculate the MIR locals which have been previously
     // borrowed (even if they are still active).
-    // This is only used for immovable generators.
-    let (borrowed_locals_analysis, borrowed_locals_result) = if !movable {
-        let analysis = HaveBeenBorrowedLocals::new(body);
-        let result =
-            do_dataflow(tcx, body, def_id, &[], &dead_unwinds, analysis,
-                        |bd, p| DebugFormatted::new(&bd.body().local_decls[p]));
-        (Some(analysis), Some(RefCell::new(DataflowResultsCursor::new(result, body))))
-    } else {
-        (None, None)
-    };
+    let borrowed_locals_analysis = HaveBeenBorrowedLocals::new(body);
+    let result =
+        do_dataflow(tcx, body, def_id, &[], &dead_unwinds, borrowed_locals_analysis,
+                    |bd, p| DebugFormatted::new(&bd.body().local_decls[p]));
+    let borrowed_locals_result = Some(RefCell::new(DataflowResultsCursor::new(result, body)));
 
     // Calculate the MIR locals that we actually need to keep storage around
     // for.
@@ -481,10 +476,10 @@ fn locals_live_across_suspend_points(
                 statement_index: data.statements.len(),
             };
 
-            if let Some(ref analysis) = borrowed_locals_analysis {
+            if !movable {
                 let cursor = borrowed_locals_result.as_ref().unwrap().borrow();
                 let borrowed_locals = state_for_location(loc,
-                                                         analysis,
+                                                         &borrowed_locals_analysis,
                                                          cursor.base_results(),
                                                          body);
                 // The `liveness` variable contains the liveness of MIR locals ignoring borrows.

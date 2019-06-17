@@ -377,7 +377,13 @@ where
         }
 
         let start_index;
-        if !self.curr_loc.map(|cur| loc.block == cur.block).unwrap_or(false) {
+        let should_reset = match self.curr_loc {
+            None => true,
+            Some(cur)
+                if loc.block != cur.block || loc.statement_index < cur.statement_index => true,
+            _ => false,
+        };
+        if should_reset {
             self.flow_state.reset_to_entry_of(loc.block);
             start_index = 0;
         } else {
