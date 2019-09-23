@@ -56,11 +56,15 @@ pub fn inject(
     // even in non-test builds
     let test_runner = get_test_runner(span_diagnostic, &krate);
 
-    let panic_strategy = match (panic_strategy, enable_panic_abort_tests) {
-        (PanicStrategy::Abort, true) => PanicStrategy::Abort,
-        _ => PanicStrategy::Unwind,
-    };
     if should_test {
+        let panic_strategy = match (panic_strategy, enable_panic_abort_tests) {
+            (PanicStrategy::Abort, true) => PanicStrategy::Abort,
+            (PanicStrategy::Abort, false) => {
+                span_diagnostic.err("building tests with panic=abort is not yet supported");
+                PanicStrategy::Unwind
+            }
+            (PanicStrategy::Unwind, _) => PanicStrategy::Unwind,
+        };
         generate_test_harness(sess, resolver, reexport_test_harness_main,
                               krate, features, panic_strategy, test_runner)
     }

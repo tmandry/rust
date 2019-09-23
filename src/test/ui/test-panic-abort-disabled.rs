@@ -1,8 +1,7 @@
+// error-pattern:building tests with panic=abort is not yet supported
 // no-prefer-dynamic
 // compile-flags: --test -Cpanic=abort
 // run-flags: --test-threads=1
-// run-fail
-// check-run-results
 
 // ignore-wasm no panic or subprocess support
 // ignore-emscripten no panic or subprocess support
