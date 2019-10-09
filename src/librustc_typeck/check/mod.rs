@@ -1387,6 +1387,7 @@ fn check_opaque<'tcx>(
     span: Span,
     origin: &hir::OpaqueTyOrigin,
 ) {
+    debug!("check_opaque: def_id={:?} span={:?} origin={:?}", def_id, span, origin);
     check_opaque_for_inheriting_lifetimes(tcx, def_id, span);
     check_opaque_for_cycles(tcx, def_id, substs, span, origin);
 }
@@ -1467,6 +1468,7 @@ fn check_opaque_for_cycles<'tcx>(
     span: Span,
     origin: &hir::OpaqueTyOrigin,
 ) {
+    debug!("check_opaque_for_cycles: def_id={:?} span={:?} origin={:?}", def_id, span, origin);
     if let Err(partially_expanded_type) = tcx.try_expand_impl_trait_type(def_id, substs) {
         if let hir::OpaqueTyOrigin::AsyncFn = origin {
             struct_span_err!(
@@ -1490,6 +1492,7 @@ fn check_opaque_for_cycles<'tcx>(
             err.emit();
         }
     }
+    debug!("check_opaque_for_cycles: finished");
 }
 
 // Forbid defining intrinsics in Rust code,
@@ -1555,6 +1558,7 @@ pub fn check_item_type<'tcx>(tcx: TyCtxt<'tcx>, it: &'tcx hir::Item) {
             check_union(tcx, it.hir_id, it.span);
         }
         hir::ItemKind::OpaqueTy(hir::OpaqueTy{origin, ..}) => {
+            eprintln!("OpaqueTy");
             let def_id = tcx.hir().local_def_id(it.hir_id);
 
             let substs = InternalSubsts::identity_for_item(tcx, def_id);

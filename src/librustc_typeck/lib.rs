@@ -58,6 +58,7 @@ This API is completely unstable and subject to change.
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/")]
 
 #![allow(non_camel_case_types)]
+#![allow(unused)]
 
 #![feature(box_patterns)]
 #![feature(box_syntax)]

@@ -689,6 +689,7 @@ impl<'tcx> TyCtxt<'tcx> {
         def_id: DefId,
         substs: SubstsRef<'tcx>,
     ) -> Result<Ty<'tcx>, Ty<'tcx>> {
+        debug!("try_expand_impl_trait_type({:?} {:?})", def_id, substs);
         use crate::ty::fold::TypeFolder;
 
         struct OpaqueTypeExpander<'tcx> {
@@ -700,6 +701,10 @@ impl<'tcx> TyCtxt<'tcx> {
             primary_def_id: DefId,
             found_recursion: bool,
             tcx: TyCtxt<'tcx>,
+            indent: usize,
+            max_indent: usize,
+            seen: usize,
+            seen_opaque: usize,
         }
 
         impl<'tcx> OpaqueTypeExpander<'tcx> {
@@ -715,6 +720,8 @@ impl<'tcx> TyCtxt<'tcx> {
                 if self.seen_opaque_tys.insert(def_id) {
                     let generic_ty = self.tcx.type_of(def_id);
                     let concrete_ty = generic_ty.subst(self.tcx, substs);
+                    trace!("OTE [{:7}]: {:indent$}{:?} [{}]",
+                           self.seen, "", concrete_ty, self.indent, indent=self.indent * 2);
                     let expanded_ty = self.fold_ty(concrete_ty);
                     self.seen_opaque_tys.remove(&def_id);
                     Some(expanded_ty)
@@ -733,8 +740,14 @@ impl<'tcx> TyCtxt<'tcx> {
             }
 
             fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
+                self.seen += 1;
                 if let ty::Opaque(def_id, substs) = t.kind {
-                    self.expand_opaque_ty(def_id, substs).unwrap_or(t)
+                    self.seen_opaque += 1;
+                    self.indent += 1;
+                    self.max_indent = std::cmp::max(self.max_indent, self.indent);
+                    let r = self.expand_opaque_ty(def_id, substs).unwrap_or(t);
+                    self.indent -= 1;
+                    r
                 } else {
                     t.super_fold_with(self)
                 }
@@ -746,13 +759,20 @@ impl<'tcx> TyCtxt<'tcx> {
             primary_def_id: def_id,
             found_recursion: false,
             tcx: self,
+            indent: 0,
+            max_indent: 0,
+            seen: 0,
+            seen_opaque: 0,
         };
         let expanded_type = visitor.expand_opaque_ty(def_id, substs).unwrap();
-        if visitor.found_recursion {
+        let r = if visitor.found_recursion {
             Err(expanded_type)
         } else {
             Ok(expanded_type)
-        }
+        };
+        debug!("try_expand_impl_trait_type({:?} {:?}): seen={}, seen_opaque={}, max_indent={}; r={:?}",
+               def_id, substs, visitor.seen, visitor.seen_opaque, visitor.max_indent, r);
+        r
     }
 }
 
