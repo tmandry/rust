@@ -2769,9 +2769,11 @@ pub struct GeneratorLayout<'tcx> {
     /// debuginfo generation, and will be removed at some point.
     /// Do **NOT** use it for anything else, local information should not be
     /// in the MIR, please rely on local crate HIR or other side-channels.
+    ///
+    /// None for upvars.
     //
     // FIXME(tmandry): see above.
-    pub __local_debuginfo_codegen_only_do_not_use: IndexVec<GeneratorSavedLocal, LocalDecl<'tcx>>,
+    pub __local_debuginfo_codegen_only_do_not_use: IndexVec<GeneratorSavedLocal, Option<LocalDecl<'tcx>>>,
 }
 
 #[derive(Clone, Debug, RustcEncodable, RustcDecodable, HashStable)]

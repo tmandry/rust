@@ -691,16 +691,16 @@ pub fn type_metadata(
                                    usage_site_span,
                                    Some(containing_scope)).finalize(cx)
         }
-        ty::Generator(def_id, substs,  _) => {
-            let upvar_tys : Vec<_> = substs.prefix_tys(def_id, cx.tcx).map(|t| {
-                cx.tcx.normalize_erasing_regions(ParamEnv::reveal_all(), t)
-            }).collect();
+        ty::Generator(def_id, _,  _) => {
+            //let upvar_tys : Vec<_> = substs.prefix_tys(def_id, cx.tcx).map(|t| {
+            //    cx.tcx.normalize_erasing_regions(ParamEnv::reveal_all(), t)
+            //}).collect();
             prepare_enum_metadata(cx,
                                   t,
                                   def_id,
                                   unique_type_id,
                                   usage_site_span,
-                                  upvar_tys).finalize(cx)
+                                  vec![]).finalize(cx)
         }
         ty::Adt(def, ..) => match def.adt_kind() {
             AdtKind::Struct => {
@@ -1641,9 +1641,13 @@ impl<'tcx> VariantInfo<'tcx> {
             VariantInfo::Adt(variant) if variant.ctor_kind != CtorKind::Fn =>
                 Some(variant.fields[i].ident.to_string()),
             VariantInfo::Generator(_, generator_layout, variant_index) => {
+                if variant_index == &VariantIdx::from(0usize) {
+                    // TODO
+                    return "__some_upvar__".into();
+                }
                 let field = generator_layout.variant_fields[*variant_index][i.into()];
                 let decl = &generator_layout.__local_debuginfo_codegen_only_do_not_use[field];
-                decl.name.map(|name| name.to_string())
+                decl.as_ref().unwrap().name.map(|name| name.to_string())
             }
             _ => None,
         };

@@ -561,8 +561,10 @@ impl<'tcx> GeneratorSubsts<'tcx> {
     /// This is the types of the fields of a generator which are not stored in a
     /// variant.
     #[inline]
-    pub fn prefix_tys(self, def_id: DefId, tcx: TyCtxt<'tcx>) -> impl Iterator<Item = Ty<'tcx>> {
-        self.upvar_tys(def_id, tcx)
+    pub fn prefix_tys(self, _def_id: DefId, _tcx: TyCtxt<'tcx>) -> impl Iterator<Item = Ty<'tcx>> {
+        // TODO remove
+        std::iter::empty()
+        //self.upvar_tys(def_id, tcx)
     }
 }
 

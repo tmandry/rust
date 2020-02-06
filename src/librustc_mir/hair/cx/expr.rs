@@ -12,6 +12,7 @@ use rustc::ty::subst::{InternalSubsts, SubstsRef};
 use rustc::hir;
 use rustc::hir::def_id::LocalDefId;
 use rustc::mir::BorrowKind;
+use rustc_target::abi::VariantIdx;
 use syntax_pos::Span;
 
 impl<'tcx> Mirror<'tcx> for &'tcx hir::Expr {
@@ -1011,7 +1012,7 @@ fn convert_var(
                                                            });
                         Expr {
                             ty: closure_ty,
-                            temp_lifetime: temp_lifetime,
+                            temp_lifetime,
                             span: expr.span,
                             kind: ExprKind::Deref {
                                 arg: Expr {
@@ -1053,13 +1054,15 @@ fn convert_var(
                         }
                     }
                 }
-            } else {
+            } else if let ty::Generator(_, _, _) = closure_ty.sty {
                 Expr {
                     ty: closure_ty,
                     temp_lifetime,
                     span: expr.span,
                     kind: ExprKind::SelfRef,
                 }
+            } else {
+                bug!("unexpected closure type {}", closure_ty)
             };
 
             // at this point we have `self.n`, which loads up the upvar

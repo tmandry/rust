@@ -60,6 +60,12 @@
 use std::ops::Generator;
 use std::pin::Pin;
 
+enum Foo {
+    Apple,
+    Banana(i32),
+    Cherry { bar: String },
+}
+
 fn main() {
     let mut a = 5;
     let mut b = || {
@@ -82,6 +88,8 @@ fn main() {
     Pin::new(&mut b).resume();
     Pin::new(&mut b).resume();
     _zzz(); // #break
+
+    let z = Foo::Banana(42);
 }
 
 fn _zzz() {()}

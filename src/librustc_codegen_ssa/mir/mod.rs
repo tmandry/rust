@@ -1,4 +1,4 @@
-use rustc::ty::{self, Ty, TypeFoldable, UpvarSubsts, Instance};
+use rustc::ty::{self, GeneratorSubsts, Ty, TypeFoldable, UpvarSubsts, Instance};
 use rustc::ty::layout::{TyLayout, HasTyCtxt, FnTypeExt};
 use rustc::mir::{self, Body};
 use rustc::session::config::DebugInfo;
@@ -624,9 +624,13 @@ fn arg_local_refs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                 _ => (arg.layout, false)
             };
 
+            let mut is_generator = false;
             let (def_id, upvar_substs) = match closure_layout.ty.sty {
                 ty::Closure(def_id, substs) => (def_id, UpvarSubsts::Closure(substs)),
-                ty::Generator(def_id, substs, _) => (def_id, UpvarSubsts::Generator(substs)),
+                ty::Generator(def_id, substs, _) => {
+                    is_generator = true;
+                    (def_id, UpvarSubsts::Generator(substs))
+                }
                 _ => bug!("upvar debuginfo with non-closure arg0 type `{}`", closure_layout.ty)
             };
             let upvar_tys = upvar_substs.upvar_tys(def_id, tcx);
@@ -637,7 +641,12 @@ fn arg_local_refs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                     .zip(upvar_tys)
                     .enumerate()
                     .map(|(i, (upvar, ty))| {
-                        (None, i, upvar.debug_name, upvar.by_ref, ty, scope, DUMMY_SP)
+                        let index = if is_generator {
+                            Some(VariantIdx::from(GeneratorSubsts::UNRESUMED))
+                        } else {
+                            None
+                        };
+                        (index, i, upvar.debug_name, upvar.by_ref, ty, scope, DUMMY_SP)
                     });
 
                 let generator_fields = mir.generator_layout.as_ref().map(|generator_layout| {
@@ -658,17 +667,23 @@ fn arg_local_refs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
                                 .filter_map(move |(i, (field, ty))| {
                                     let decl = &generator_layout.
                                         __local_debuginfo_codegen_only_do_not_use[*field];
-                                    if let Some(name) = decl.name {
-                                        let ty = fx.monomorphize(&ty);
-                                        let (var_scope, var_span) = fx.debug_loc(mir::SourceInfo {
-                                            span: decl.source_info.span,
-                                            scope: decl.visibility_scope,
-                                        });
-                                        let var_scope = var_scope.unwrap_or(scope);
-                                        Some((variant_idx, i, name, false, ty, var_scope, var_span))
-                                    } else {
-                                        None
+                                    if decl.is_none() {
+                                        // upvar, we handle these elsewhere
+                                        return None;
                                     }
+                                    let decl = decl.as_ref().unwrap();
+                                    if decl.name.is_none() {
+                                        return None;
+                                    }
+                                    let name = decl.name.unwrap();
+
+                                    let ty = fx.monomorphize(&ty);
+                                    let (var_scope, var_span) = fx.debug_loc(mir::SourceInfo {
+                                        span: decl.source_info.span,
+                                        scope: decl.visibility_scope,
+                                    });
+                                    let var_scope = var_scope.unwrap_or(scope);
+                                    Some((variant_idx, i, name, false, ty, var_scope, var_span))
                             })
                         })
                 }).into_iter().flatten();

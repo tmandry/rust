@@ -252,8 +252,12 @@ impl MutVisitor<'tcx> for TransformVisitor<'tcx> {
                     context: PlaceContext,
                     location: Location) {
         if let PlaceBase::Local(l) = place.base {
-            // Replace an Local in the remap with a generator struct access
-            if let Some(&(ty, variant_index, idx)) = self.remap.get(&l) {
+            if l == self_arg() && !place.projection.is_empty() {
+                // Rewrite upvar accesses to use the Unresumed variant
+                let unresumed = VariantIdx::from(UNRESUMED);
+                replace_base(place, Place::from(self_arg()).downcast_unnamed(unresumed));
+            } else if let Some(&(ty, variant_index, idx)) = self.remap.get(&l) {
+                // Replace a Local in the remap with a generator struct access
                 replace_base(place, self.make_field(variant_index, idx, ty));
             }
         } else {
@@ -429,6 +433,7 @@ fn locals_live_across_suspend_points(
     body: &Body<'tcx>,
     source: MirSource<'tcx>,
     movable: bool,
+    upvar_count: usize,
 ) -> LivenessInfo {
     let dead_unwinds = BitSet::new_empty(body.basic_blocks().len());
     let def_id = source.def_id();
@@ -481,7 +486,7 @@ fn locals_live_across_suspend_points(
     for (block, data) in body.basic_blocks().iter_enumerated() {
         if let TerminatorKind::Yield { .. } = data.terminator().kind {
             let loc = Location {
-                block: block,
+                block,
                 statement_index: data.statements.len(),
             };
 
@@ -537,14 +542,15 @@ fn locals_live_across_suspend_points(
     // saving.
     let live_locals_at_suspension_points = live_locals_at_suspension_points
         .iter()
-        .map(|live_here| renumber_bitset(&live_here, &live_locals))
+        .map(|live_here| renumber_bitset(&live_here, &live_locals, upvar_count))
         .collect();
 
     let storage_conflicts = compute_storage_conflicts(
         body,
         &live_locals,
         &ignored,
-        requires_storage_results);
+        requires_storage_results,
+        upvar_count);
 
     LivenessInfo {
         live_locals,
@@ -559,12 +565,12 @@ fn locals_live_across_suspend_points(
 ///
 /// For example, if `stored_locals = [1, 3, 5]`, this would be renumbered to
 /// `[0, 1, 2]`. Thus, if `input = [3, 5]` we would return `[1, 2]`.
-fn renumber_bitset(input: &BitSet<Local>, stored_locals: &liveness::LiveVarSet)
+fn renumber_bitset(input: &BitSet<Local>, stored_locals: &liveness::LiveVarSet, offset: usize)
 -> BitSet<GeneratorSavedLocal> {
     assert!(stored_locals.superset(&input), "{:?} not a superset of {:?}", stored_locals, input);
     let mut out = BitSet::new_empty(stored_locals.count());
     for (idx, local) in stored_locals.iter().enumerate() {
-        let saved_local = GeneratorSavedLocal::from(idx);
+        let saved_local = GeneratorSavedLocal::from(idx + offset);
         if input.contains(local) {
             out.insert(saved_local);
         }
@@ -582,6 +588,7 @@ fn compute_storage_conflicts(
     stored_locals: &liveness::LiveVarSet,
     ignored: &StorageIgnored,
     requires_storage: DataflowResults<'tcx, RequiresStorage<'mir, 'tcx>>,
+    upvar_count: usize,
 ) -> BitMatrix<GeneratorSavedLocal, GeneratorSavedLocal> {
     assert_eq!(body.local_decls.len(), ignored.0.domain_size());
     assert_eq!(body.local_decls.len(), stored_locals.domain_size());
@@ -612,14 +619,14 @@ fn compute_storage_conflicts(
     // simpler to keep it this way for now.
     let mut storage_conflicts = BitMatrix::new(stored_locals.count(), stored_locals.count());
     for (idx_a, local_a) in stored_locals.iter().enumerate() {
-        let saved_local_a = GeneratorSavedLocal::new(idx_a);
+        let saved_local_a = GeneratorSavedLocal::new(upvar_count + idx_a);
         if ineligible_locals.contains(local_a) {
             // Conflicts with everything.
             storage_conflicts.insert_all_into_row(saved_local_a);
         } else {
             // Keep overlap information only for stored locals.
             for (idx_b, local_b) in stored_locals.iter().enumerate() {
-                let saved_local_b = GeneratorSavedLocal::new(idx_b);
+                let saved_local_b = GeneratorSavedLocal::new(upvar_count + idx_b);
                 if local_conflicts.contains(local_a, local_b) {
                     storage_conflicts.insert(saved_local_a, saved_local_b);
                 }
@@ -706,7 +713,7 @@ fn compute_layout<'tcx>(
     // Use a liveness analysis to compute locals which are live across a suspension point
     let LivenessInfo {
         live_locals, live_locals_at_suspension_points, storage_conflicts, storage_liveness
-    } = locals_live_across_suspend_points(tcx, body, source, movable);
+    } = locals_live_across_suspend_points(tcx, body, source, movable, upvars.len());
 
     // Erase regions from the types passed in from typeck so we can compare them with
     // MIR types
@@ -737,14 +744,15 @@ fn compute_layout<'tcx>(
 
     // Gather live locals and their indices replacing values in body.local_decls
     // with a dummy to avoid changing local indices.
-    let mut locals = IndexVec::<GeneratorSavedLocal, _>::new();
-    let mut tys = IndexVec::<GeneratorSavedLocal, _>::new();
-    let mut decls = IndexVec::<GeneratorSavedLocal, _>::new();
+    let mut locals = IndexVec::<GeneratorSavedLocal, _>::from_elem_n(None, upvars.len());
+    let mut tys = IndexVec::<GeneratorSavedLocal, _>::from_raw(upvars.clone());
+    let mut decls = IndexVec::<GeneratorSavedLocal, _>::from_elem_n(None, upvars.len());
     for (idx, local) in live_locals.iter().enumerate() {
+        let idx = upvars.len() + idx;
         let var = mem::replace(&mut body.local_decls[local], dummy_local.clone());
-        locals.push(local);
+        locals.push(Some(local));
         tys.push(var.ty);
-        decls.push(var);
+        decls.push(Some(var));
         debug!("generator saved local {:?} => {:?}", GeneratorSavedLocal::from(idx), local);
     }
 
@@ -755,6 +763,10 @@ fn compute_layout<'tcx>(
     // Create a map from local indices to generator struct indices.
     let mut variant_fields: IndexVec<VariantIdx, IndexVec<Field, GeneratorSavedLocal>> =
         iter::repeat(IndexVec::new()).take(RESERVED_VARIANTS).collect();
+
+    let unresumed = VariantIdx::from(UNRESUMED);
+    variant_fields[unresumed] = (0..upvars.len()).map(GeneratorSavedLocal::from).collect();
+
     let mut remap = FxHashMap::default();
     for (suspension_point_idx, live_locals) in live_locals_at_suspension_points.iter().enumerate() {
         let variant_index = VariantIdx::from(RESERVED_VARIANTS + suspension_point_idx);
@@ -765,7 +777,9 @@ fn compute_layout<'tcx>(
             // just use the first one here. That's fine; fields do not move
             // around inside generators, so it doesn't matter which variant
             // index we access them by.
-            remap.entry(locals[saved_local]).or_insert((tys[saved_local], variant_index, idx));
+            if let Some(l) = locals[saved_local] {
+                remap.entry(l).or_insert((tys[saved_local], variant_index, idx));
+            }
         }
         variant_fields.push(fields);
     }

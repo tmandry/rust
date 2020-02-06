@@ -1,9 +1,10 @@
-use rustc::ty::{self, Ty, adjustment::{PointerCast}, Instance};
+use rustc::ty::{self, GeneratorSubsts, Ty, adjustment::{PointerCast}, Instance};
 use rustc::ty::cast::{CastTy, IntTy};
 use rustc::ty::layout::{self, LayoutOf, HasTyCtxt};
 use rustc::mir;
 use rustc::middle::lang_items::ExchangeMallocFnLangItem;
 use rustc_apfloat::{ieee, Float, Status, Round};
+use rustc_target::abi::VariantIdx;
 use std::{u128, i128};
 use syntax::symbol::sym;
 use syntax::source_map::{DUMMY_SP, Span};
@@ -121,6 +122,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         } else {
                             (dest, active_field_index)
                         }
+                    }
+                    mir::AggregateKind::Generator(_, _, _) => {
+                        let unresumed = VariantIdx::from(GeneratorSubsts::UNRESUMED);
+                        dest.codegen_set_discr(&mut bx, unresumed);
+                        (dest.project_downcast(&mut bx, unresumed), None)
                     }
                     _ => (dest, None)
                 };
