@@ -57,6 +57,7 @@ use crate::transform::no_landing_pads::no_landing_pads;
 use crate::transform::simplify;
 use crate::transform::{MirPass, MirSource};
 use crate::util::dump_mir;
+use crate::util::patch::MirPatch;
 use crate::util::storage;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir as hir;
@@ -494,14 +495,14 @@ fn locals_live_across_suspend_points(
     let mut live_locals_at_any_suspension_point = BitSet::new_empty(body.local_decls.len());
 
     for (block, data) in body.basic_blocks().iter_enumerated() {
-        if !matches!(data.terminator().kind, TerminatorKind::Yield { ..  }) {
-            continue;
-        }
-
         // Store the storage liveness for later use so we can restore the state
         // after a suspension point
         storage_live.seek_to_block_end(block);
         storage_liveness_map[block] = Some(storage_live.get().clone());
+
+        if !matches!(data.terminator().kind, TerminatorKind::Yield { ..  }) {
+            continue;
+        }
 
         let mut live_locals = locals_live_across_yield_point(block);
 
@@ -797,7 +798,6 @@ fn insert_switch<'tcx>(
 fn elaborate_generator_drops<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, body: &mut Body<'tcx>) {
     use crate::shim::DropShimElaborator;
     use crate::util::elaborate_drops::{elaborate_drop, Unwind};
-    use crate::util::patch::MirPatch;
 
     // Note that `elaborate_drops` only drops the upvars of a generator, and
     // this is ok because `open_drop` can only be reached within that own
@@ -1007,32 +1007,56 @@ fn create_generator_resume_function<'tcx>(
     // Poison the generator when it unwinds
     if can_unwind {
         let source_info = SourceInfo::outermost(body.span);
-        let poison_block = body.basic_blocks_mut().push(BasicBlockData {
+        let mut patch = MirPatch::new(body);
+        let poison_block = patch.new_block(BasicBlockData {
             statements: vec![transform.set_discr(VariantIdx::new(POISONED), source_info)],
             terminator: Some(Terminator { source_info, kind: TerminatorKind::Resume }),
             is_cleanup: true,
         });
 
-        for (idx, block) in body.basic_blocks_mut().iter_enumerated_mut() {
+        for (idx, block) in body.basic_blocks().iter_enumerated() {
             let source_info = block.terminator().source_info;
+            let empty_liveness = BitSet::new_empty(0);
+            let storage_deads = transform
+                .storage_liveness.get(idx).map(|info| info.as_ref().unwrap()).unwrap_or(&empty_liveness)
+                .iter()
+                .filter(|local| *local != SELF_ARG)
+                .filter(|local| !transform.always_live_locals.contains(*local))
+                .filter(|local| !transform.remap.contains_key(local))
+                .map(|local| StatementKind::StorageDead(local));
 
             if let TerminatorKind::Resume = block.terminator().kind {
                 // An existing `Resume` terminator is redirected to jump to our dedicated
                 // "poisoning block" above.
-                if idx != poison_block {
-                    *block.terminator_mut() = Terminator {
-                        source_info,
-                        kind: TerminatorKind::Goto { target: poison_block },
-                    };
+                patch.patch_terminator(idx, TerminatorKind::Goto { target: poison_block });
+                // Before redirecting, we declare StorageDead for any variables
+                // that might be StorageLive.
+                for stmt_kind in storage_deads {
+                    patch.add_statement(patch.terminator_loc(body, idx), stmt_kind);
                 }
             } else if !block.is_cleanup {
                 // Any terminators that *can* unwind but don't have an unwind target set are also
                 // pointed at our poisoning block (unless they're part of the cleanup path).
-                if let Some(unwind @ None) = block.terminator_mut().unwind_mut() {
-                    *unwind = Some(poison_block);
+                let mut terminator = block.terminator().clone();
+                if let Some(unwind @ None) = terminator.unwind_mut() {
+                    let storage_deads: Vec<_> = storage_deads.map(|kind| Statement { source_info, kind }).collect();
+                    let target = if storage_deads.is_empty() {
+                        poison_block
+                    } else {
+                        let storage_dead_block = patch.new_block(BasicBlockData {
+                            statements: storage_deads,
+                            terminator: Some(Terminator { source_info, kind: TerminatorKind::Goto { target: poison_block }}),
+                            is_cleanup: true,
+                        });
+                        storage_dead_block
+                    };
+                    *unwind = Some(target);
+                    patch.patch_terminator(idx, terminator.kind);
                 }
             }
         }
+
+        patch.apply(body);
     }
 
     let mut cases = create_cases(body, &transform, Operation::Resume);
@@ -1219,7 +1243,7 @@ impl<'tcx> MirPass<'tcx> for StateTransform {
 
         // When first entering the generator, move the resume argument into its new local.
         let source_info = SourceInfo::outermost(body.span);
-        let stmts = &mut body.basic_blocks_mut()[BasicBlock::new(0)].statements;
+        let stmts = &mut body.basic_blocks_mut()[START_BLOCK].statements;
         stmts.insert(
             0,
             Statement {
