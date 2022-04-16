@@ -211,8 +211,8 @@ pub fn each_linked_rlib(
         return Err("could not find formats for rlibs".to_string());
     };
     for &cnum in crates {
-        match fmts.get(cnum.as_usize() - 1) {
-            Some(&Linkage::NotLinked | &Linkage::IncludedFromDylib) => continue,
+        match fmts.get(cnum.as_usize() - 1).as_deref() {
+            Some(Linkage::NotLinked | Linkage::IncludedFromDylib | Linkage::Dynamic) => continue,
             Some(_) => {}
             None => return Err("could not find formats for rlibs".to_string()),
         }

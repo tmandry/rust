@@ -124,7 +124,7 @@ fn calculate_type(tcx: TyCtxt<'_>, ty: CrateType) -> DependencyList {
 
         // Staticlibs and static executables must have all static dependencies.
         // If any are not found, generate some nice pretty errors.
-        if ty == CrateType::Staticlib
+        if false /*ty == CrateType::Staticlib*/
             || (ty == CrateType::Executable
                 && sess.crt_static(Some(ty))
                 && !sess.target.crt_static_allows_dylibs)
@@ -133,6 +133,7 @@ fn calculate_type(tcx: TyCtxt<'_>, ty: CrateType) -> DependencyList {
                 if tcx.dep_kind(cnum).macros_only() {
                     continue;
                 }
+                tracing::info!("checking for rlib: {}({})", tcx.crate_name(cnum), cnum);
                 let src = tcx.used_crate_source(cnum);
                 if src.rlib.is_some() {
                     continue;
@@ -159,11 +160,11 @@ fn calculate_type(tcx: TyCtxt<'_>, ty: CrateType) -> DependencyList {
         let name = tcx.crate_name(cnum);
         let src = tcx.used_crate_source(cnum);
         if src.dylib.is_some() {
-            tracing::info!("adding dylib: {}", name);
+            tracing::info!("adding dylib: {}({})", name, cnum);
             add_library(tcx, cnum, RequireDynamic, &mut formats);
             let deps = tcx.dylib_dependency_formats(cnum);
             for &(depnum, style) in deps.iter() {
-                tracing::info!("adding {:?}: {}", style, tcx.crate_name(depnum));
+                tracing::info!("- adding {:?}: {}({})", style, tcx.crate_name(depnum), depnum);
                 add_library(tcx, depnum, style, &mut formats);
             }
         }
