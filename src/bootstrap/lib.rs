@@ -857,11 +857,10 @@ impl Build {
     fn is_rust_llvm(&self, target: TargetSelection) -> bool {
         match self.config.target_config.get(&target) {
             Some(Target { llvm_has_rust_patches: Some(patched), .. }) => *patched,
-            Some(Target { llvm_config, .. }) => {
+            Some(Target { llvm_config, .. }) =>
                 // If the user set llvm-config we assume Rust is not patched,
                 // but first check to see if it was configured by llvm-from-ci.
-                (self.config.llvm_from_ci && target == self.config.build) || llvm_config.is_none()
-            }
+                (self.config.llvm_from_ci && target == self.config.build) || llvm_config.is_none(),
             None => true,
         }
     }
