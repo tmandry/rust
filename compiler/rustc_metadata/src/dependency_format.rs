@@ -53,8 +53,8 @@
 
 use crate::creader::CStore;
 use crate::errors::{
-    BadPanicStrategy, CrateDepMultiple, IncompatiblePanicInDropStrategy, LibRequired,
-    RequiredPanicStrategy, RlibRequired, RustcLibRequired, TwoPanicRuntimes,
+    BadPanicStrategy, IncompatiblePanicInDropStrategy, LibRequired, RequiredPanicStrategy,
+    RlibRequired, RustcLibRequired, TwoPanicRuntimes,
 };
 
 use rustc_data_structures::fx::FxHashMap;
@@ -247,29 +247,31 @@ fn calculate_type(tcx: TyCtxt<'_>, ty: CrateType) -> DependencyList {
     ret
 }
 
+#[allow(unused_variables)]
 fn add_library(
     tcx: TyCtxt<'_>,
     cnum: CrateNum,
     link: LinkagePreference,
     m: &mut FxHashMap<CrateNum, LinkagePreference>,
 ) {
-    match m.get(&cnum) {
-        Some(&link2) => {
-            // If the linkages differ, then we'd have two copies of the library
-            // if we continued linking. If the linkages are both static, then we
-            // would also have two copies of the library (static from two
-            // different locations).
-            //
-            // This error is probably a little obscure, but I imagine that it
-            // can be refined over time.
-            if link2 != link || link == RequireStatic {
-                tcx.dcx().emit_err(CrateDepMultiple { crate_name: tcx.crate_name(cnum) });
-            }
-        }
-        None => {
-            m.insert(cnum, link);
-        }
-    }
+    m.insert(cnum, link);
+    // match m.get(&cnum) {
+    //     Some(&link2) => {
+    //         // If the linkages differ, then we'd have two copies of the library
+    //         // if we continued linking. If the linkages are both static, then we
+    //         // would also have two copies of the library (static from two
+    //         // different locations).
+    //         //
+    //         // This error is probably a little obscure, but I imagine that it
+    //         // can be refined over time.
+    //         if link2 != link || link == RequireStatic {
+    //             tcx.dcx().emit_err(CrateDepMultiple { crate_name: tcx.crate_name(cnum) });
+    //         }
+    //     }
+    //     None => {
+    //         m.insert(cnum, link);
+    //     }
+    // }
 }
 
 fn attempt_static(tcx: TyCtxt<'_>) -> Option<DependencyList> {
