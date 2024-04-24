@@ -94,8 +94,9 @@ impl FileEncoder {
                 self.flush_every_write = true;
             }
             // If the offset we want to panic at is in the range we're about to write, panic.
-            if (self.flushed..self.flushed + self.buffered).contains(&panic_offset) {
-                panic!()
+            let range = self.flushed..self.flushed + self.buffered;
+            if range.contains(&panic_offset) {
+                panic!("{range:x?} contains {panic_offset:x}")
             }
         }
 
@@ -127,14 +128,18 @@ impl FileEncoder {
         if let Some(dest) = self.buf.get_mut(..buf.len()) {
             dest.copy_from_slice(buf);
             self.buffered += buf.len();
+            if std::intrinsics::unlikely(self.flush_every_write) {
+                self.flush();
+            }
         } else {
             if self.res.is_ok() {
                 self.res = self.file.write_all(buf);
             }
             // This write bypasses the buffer, so we need to duplicate the check logic here
             if let Some(panic_offset) = self.panic_at_offset {
-                if (self.flushed..self.flushed + buf.len()).contains(&panic_offset) {
-                    panic!()
+                let range = self.flushed..self.flushed + buf.len();
+                if range.contains(&panic_offset) {
+                    panic!("{range:x?} contains {panic_offset:x}")
                 }
             }
             self.flushed += buf.len();
@@ -191,24 +196,9 @@ impl FileEncoder {
             Self::panic_invalid_write::<N>(written);
         }
         self.buffered = self.buffered.debug_strict_add(written);
-    }
-
-    #[inline]
-    pub fn write_with_spare(&mut self, visitor: impl FnOnce(&mut [u8]) -> usize) {
-        #[cold]
-        #[inline(never)]
-        fn panic_invalid_write_spare() {
-            panic!(
-                "FileEncoder::write_with_spare cannot be used to write more bytes than the current buffer size!"
-            );
+        if std::intrinsics::unlikely(self.flush_every_write) {
+            self.flush();
         }
-
-        let buf = self.buffer_empty();
-        let written = visitor(buf);
-        if written > buf.len() {
-            panic_invalid_write_spare();
-        }
-        self.buffered += written;
     }
 
     #[cold]
