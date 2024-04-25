@@ -88,16 +88,7 @@ impl FileEncoder {
         }
 
         if let Some(panic_offset) = self.panic_at_offset {
-            // If we are within the buffer size of the offset we're to panic at, we need to start
-            // flushing every write so that we don't panic late.
-            if panic_offset - self.flushed <= BUF_SIZE {
-                self.flush_every_write = true;
-            }
-            // If the offset we want to panic at is in the range we're about to write, panic.
-            let range = self.flushed..self.flushed + self.buffered;
-            if range.contains(&panic_offset) {
-                panic!("{range:x?} contains {panic_offset:x}")
-            }
+            self.check_panic_offset(panic_offset, self.buffered);
         }
 
         if self.res.is_ok() {
@@ -105,6 +96,19 @@ impl FileEncoder {
         }
         self.flushed += self.buffered;
         self.buffered = 0;
+    }
+
+    fn check_panic_offset(&mut self, panic_offset: usize, about_to_write: usize) {
+        // If the offset we want to panic at is in the range we're about to write, panic.
+        let range = self.flushed..self.flushed + about_to_write;
+        if range.contains(&panic_offset) {
+            panic!("{range:x?} contains {panic_offset:x}")
+        }
+        // If we are within the buffer size of the offset we're to panic at, we need to start
+        // flushing every write so that we don't panic late.
+        if panic_offset <= self.flushed + about_to_write + BUF_SIZE {
+            self.flush_every_write = true;
+        }
     }
 
     pub fn file(&self) -> &File {
@@ -137,10 +141,7 @@ impl FileEncoder {
             }
             // This write bypasses the buffer, so we need to duplicate the check logic here
             if let Some(panic_offset) = self.panic_at_offset {
-                let range = self.flushed..self.flushed + buf.len();
-                if range.contains(&panic_offset) {
-                    panic!("{range:x?} contains {panic_offset:x}")
-                }
+                self.check_panic_offset(panic_offset, buf.len());
             }
             self.flushed += buf.len();
         }
